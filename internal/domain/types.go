@@ -18,23 +18,44 @@ type Instrument struct {
 	OnBybit       bool   `json:"on_bybit"`
 }
 
+type ContractSpec struct {
+	Exchange     Exchange `json:"exchange"`
+	Symbol       string   `json:"symbol"`
+	BaseAsset    string   `json:"base_asset"`
+	QuoteAsset   string   `json:"quote_asset"`
+	Status       string   `json:"status"`
+	ContractType string   `json:"contract_type"`
+	TickSize     float64  `json:"tick_size"`
+}
+
 type Ticker struct {
-	Symbol       string    `json:"symbol"`
-	Exchange     Exchange  `json:"exchange"`
-	Price        float64   `json:"price"`
-	High24h      float64   `json:"high_24h"`
-	Low24h       float64   `json:"low_24h"`
-	ChangePct24h float64   `json:"change_pct_24h"`
-	TurnoverUSD  float64   `json:"turnover_usd"`
-	FundingRate  float64   `json:"funding_rate"`
-	TickSize     float64   `json:"tick_size"`
-	Status       string    `json:"status"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	Symbol          string    `json:"symbol"`
+	SourceSymbol    string    `json:"source_symbol"`
+	Exchange        Exchange  `json:"exchange"`
+	QuoteAsset      string    `json:"quote_asset"`
+	Price           float64   `json:"price"`
+	High24h         float64   `json:"high_24h"`
+	Low24h          float64   `json:"low_24h"`
+	ChangePct24h    float64   `json:"change_pct_24h"`
+	TurnoverUSD     float64   `json:"turnover_usd"`
+	FundingRate     float64   `json:"funding_rate"`
+	OpenInterestUSD float64   `json:"open_interest_usd"`
+	TickSize        float64   `json:"tick_size"`
+	Status          string    `json:"status"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type Kline struct {
 	OpenTime time.Time `json:"open_time"`
 	Close    float64   `json:"close"`
+}
+
+type MarketSnapshot struct {
+	Exchange   Exchange          `json:"exchange"`
+	Contracts  []ContractSpec    `json:"contracts"`
+	Tickers    []Ticker          `json:"tickers"`
+	RateLimits map[string]string `json:"rate_limits"`
+	FetchedAt  time.Time         `json:"fetched_at"`
 }
 
 type MetricsRow struct {
