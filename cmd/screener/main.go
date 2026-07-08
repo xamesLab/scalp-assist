@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"scalp-assist/internal/api"
@@ -19,6 +22,7 @@ import (
 	"scalp-assist/internal/exchange/bybit"
 	"scalp-assist/internal/metrics"
 	"scalp-assist/internal/normalize"
+	"scalp-assist/internal/scheduler"
 	"scalp-assist/internal/scoring"
 	"scalp-assist/internal/store"
 )
@@ -64,6 +68,9 @@ func main() {
 }
 
 func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, configPath string) error {
+	serverCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	db, err := store.Open(ctx, cfg.DBPath)
 	if err != nil {
 		return err
@@ -82,6 +89,20 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 	if err != nil {
 		return err
 	}
+	binanceClient := binance.New()
+	bybitClient := bybit.New()
+	sched := scheduler.New(scheduler.Options{
+		Store:        db,
+		Defaults:     cfg.Settings,
+		Blacklist:    cfg.Blacklist,
+		Overrides:    cfg.NormalizationOverrides,
+		FastInterval: cfg.Cycles.FastInterval,
+		SlowInterval: cfg.Cycles.SlowInterval,
+		Binance:      binanceClient,
+		Bybit:        bybitClient,
+		Logger:       logger,
+	})
+	sched.Start(serverCtx)
 	addr := cfg.DevHTTP
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -91,6 +112,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		Defaults:      cfg.Settings,
 		JWTSecret:     secret,
 		SecureCookies: false,
+		Refresh:       sched.Refresh,
 	})
 	logger.Info("config loaded",
 		"path", configPath,
@@ -100,7 +122,22 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		"top_n", cfg.Settings.TopN,
 	)
 	logger.Info("starting dev http api", "addr", addr)
-	return http.ListenAndServe(addr, server.Handler())
+	httpServer := &http.Server{Addr: addr, Handler: server.Handler()}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- httpServer.ListenAndServe()
+	}()
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-serverCtx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	}
 }
 
 func runResetPassword(ctx context.Context, cfg config.Config) error {
