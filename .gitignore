@@ -1,0 +1,22 @@
+# Binaries and local build output
+/screener
+/screener.exe
+/dist/
+/build/
+
+# Local runtime files
+/config.yaml
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Node artifacts for the future web app
+/web/node_modules/
+/web/dist/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
