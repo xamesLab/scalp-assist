@@ -40,6 +40,36 @@ type User struct {
 	CreatedAt    time.Time
 }
 
+type SnapshotSummary struct {
+	ID        int64
+	CreatedAt time.Time
+	Top       []string
+	PropCount int
+}
+
+type HistoryPoint struct {
+	SnapshotID   int64
+	CreatedAt    time.Time
+	Rank         int
+	Price        float64
+	TurnoverUSD  float64
+	DayRangePct  float64
+	ChangePct24h float64
+	Score        float64
+}
+
+type Stats struct {
+	Days           int
+	Frequency      []FrequencyRow
+	AveragePropTop float64
+	Newcomers      []string
+}
+
+type FrequencyRow struct {
+	Symbol string
+	Count  int
+}
+
 func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("db path is required")
@@ -214,6 +244,131 @@ func (s *Store) LatestSnapshotRows(ctx context.Context) ([]domain.MetricsRow, er
 		return nil, err
 	}
 	return s.SnapshotRows(ctx, snapshotID)
+}
+
+func (s *Store) SnapshotSummaries(ctx context.Context, from, to time.Time) ([]SnapshotSummary, error) {
+	rows, err := s.reader.QueryContext(ctx, `
+SELECT id, created_at
+FROM snapshots
+WHERE (? = '' OR created_at >= ?) AND (? = '' OR created_at <= ?)
+ORDER BY created_at DESC, id DESC`, optionalTime(from), optionalTime(from), optionalTime(to), optionalTime(to))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []SnapshotSummary
+	for rows.Next() {
+		var item SnapshotSummary
+		var created string
+		if err := rows.Scan(&item.ID, &created); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = parseTime(created)
+		topRows, err := s.SnapshotRows(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range topRows {
+			if row.Rank <= 3 {
+				item.Top = append(item.Top, displayInstrument(row.Instrument))
+			}
+			if row.InPropList {
+				item.PropCount++
+			}
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) History(ctx context.Context, symbol string, days int) ([]HistoryPoint, error) {
+	base, multiplier := parseInstrumentSymbol(symbol)
+	if base == "" {
+		return nil, fmt.Errorf("invalid symbol %q", symbol)
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	rows, err := s.reader.QueryContext(ctx, `
+SELECT s.id, s.created_at, sr.rank, sr.price, sr.turnover_usd, sr.day_range_pct, sr.change_pct_24h, sr.score
+FROM snapshot_rows sr
+JOIN snapshots s ON s.id = sr.snapshot_id
+JOIN instruments i ON i.id = sr.instrument_id
+WHERE i.base = ? AND i.multiplier = ? AND (? <= 0 OR s.created_at >= ?)
+ORDER BY s.created_at ASC`, base, multiplier, days, formatTime(cutoff))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []HistoryPoint
+	for rows.Next() {
+		var item HistoryPoint
+		var created string
+		if err := rows.Scan(&item.SnapshotID, &created, &item.Rank, &item.Price, &item.TurnoverUSD, &item.DayRangePct, &item.ChangePct24h, &item.Score); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, _ = parseTime(created)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) Stats(ctx context.Context, days int) (Stats, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	rows, err := s.reader.QueryContext(ctx, `
+SELECT i.base, i.multiplier, COUNT(*) AS hits
+FROM snapshot_rows sr
+JOIN snapshots s ON s.id = sr.snapshot_id
+JOIN instruments i ON i.id = sr.instrument_id
+WHERE (? <= 0 OR s.created_at >= ?)
+GROUP BY i.id
+ORDER BY hits DESC, i.base ASC
+LIMIT 20`, days, formatTime(cutoff))
+	if err != nil {
+		return Stats{}, err
+	}
+	defer rows.Close()
+	stats := Stats{Days: days}
+	for rows.Next() {
+		var base string
+		var multiplier, count int
+		if err := rows.Scan(&base, &multiplier, &count); err != nil {
+			return Stats{}, err
+		}
+		stats.Frequency = append(stats.Frequency, FrequencyRow{
+			Symbol: displayInstrument(domain.Instrument{Base: base, Multiplier: multiplier}),
+			Count:  count,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return Stats{}, err
+	}
+
+	var propHits, snapshots sql.NullFloat64
+	if err := s.reader.QueryRowContext(ctx, `
+SELECT SUM(prop_count), COUNT(*)
+FROM (
+  SELECT s.id, SUM(sr.in_prop_list) AS prop_count
+  FROM snapshots s
+  JOIN snapshot_rows sr ON sr.snapshot_id = s.id
+  WHERE (? <= 0 OR s.created_at >= ?)
+  GROUP BY s.id
+)`, days, formatTime(cutoff)).Scan(&propHits, &snapshots); err != nil {
+		return Stats{}, err
+	}
+	if propHits.Valid && snapshots.Valid && snapshots.Float64 > 0 {
+		stats.AveragePropTop = propHits.Float64 / snapshots.Float64
+	}
+	if len(stats.Frequency) > 0 {
+		limit := len(stats.Frequency)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, row := range stats.Frequency[:limit] {
+			stats.Newcomers = append(stats.Newcomers, row.Symbol)
+		}
+	}
+	return stats, nil
 }
 
 func (s *Store) SnapshotRows(ctx context.Context, snapshotID int64) ([]domain.MetricsRow, error) {
@@ -453,6 +608,18 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 	return user, nil
 }
 
+func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
+	var user User
+	var created string
+	err := s.reader.QueryRowContext(ctx, `SELECT id, email, password_hash, created_at FROM users WHERE id = ?`, id).
+		Scan(&user.ID, &user.Email, &user.PasswordHash, &created)
+	if err != nil {
+		return User{}, err
+	}
+	user.CreatedAt, _ = parseTime(created)
+	return user, nil
+}
+
 func (s *Store) CheckPassword(ctx context.Context, email, password string) (bool, error) {
 	user, err := s.UserByEmail(ctx, email)
 	if err != nil {
@@ -550,4 +717,33 @@ func parseTime(value string) (time.Time, error) {
 
 func instrumentKey(instrument domain.Instrument) string {
 	return fmt.Sprintf("%s:%d", instrument.Base, instrument.Multiplier)
+}
+
+func optionalTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return formatTime(value)
+}
+
+func displayInstrument(instrument domain.Instrument) string {
+	if instrument.Multiplier == 1 {
+		return instrument.Base + "USDT"
+	}
+	return fmt.Sprintf("%d%sUSDT", instrument.Multiplier, instrument.Base)
+}
+
+func parseInstrumentSymbol(symbol string) (string, int) {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	symbol = strings.TrimSuffix(symbol, "USDT")
+	if symbol == "" {
+		return "", 0
+	}
+	for _, multiplier := range []int{1000000, 10000, 1000, 100, 10} {
+		prefix := strconv.Itoa(multiplier)
+		if strings.HasPrefix(symbol, prefix) && len(symbol) > len(prefix) {
+			return strings.TrimPrefix(symbol, prefix), multiplier
+		}
+	}
+	return symbol, 1
 }

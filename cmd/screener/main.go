@@ -5,10 +5,13 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"scalp-assist/internal/api"
 	"scalp-assist/internal/config"
 	"scalp-assist/internal/corr"
 	"scalp-assist/internal/domain"
@@ -17,11 +20,13 @@ import (
 	"scalp-assist/internal/metrics"
 	"scalp-assist/internal/normalize"
 	"scalp-assist/internal/scoring"
+	"scalp-assist/internal/store"
 )
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML configuration file")
 	once := flag.Bool("once", false, "fetch market data once and print the scored top")
+	resetPassword := flag.Bool("reset-password", false, "reset first user password from auth.bootstrap_* config values")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
@@ -43,13 +48,68 @@ func main() {
 		return
 	}
 
-	slog.Info("config loaded",
-		"path", *configPath,
+	if *resetPassword {
+		if err := runResetPassword(context.Background(), cfg); err != nil {
+			slog.Error("reset password failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("password reset complete", "email", cfg.Auth.BootstrapEmail)
+		return
+	}
+
+	if err := runServer(context.Background(), cfg, logger, *configPath); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
+	}
+}
+
+func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, configPath string) error {
+	db, err := store.Open(ctx, cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if cfg.Auth.BootstrapEmail != "" && cfg.Auth.BootstrapPassword != "" {
+		created, err := db.BootstrapUser(ctx, cfg.Auth.BootstrapEmail, cfg.Auth.BootstrapPassword)
+		if err != nil {
+			return err
+		}
+		if created {
+			logger.Info("bootstrap user created", "email", cfg.Auth.BootstrapEmail)
+		}
+	}
+	secret, err := api.LoadOrCreateJWTSecret(filepath.Join(filepath.Dir(cfg.DBPath), "jwt.secret"))
+	if err != nil {
+		return err
+	}
+	addr := cfg.DevHTTP
+	if addr == "" {
+		addr = "127.0.0.1:8080"
+	}
+	server := api.New(api.Options{
+		Store:         db,
+		Defaults:      cfg.Settings,
+		JWTSecret:     secret,
+		SecureCookies: false,
+	})
+	logger.Info("config loaded",
+		"path", configPath,
 		"domain", cfg.Domain,
 		"db_path", cfg.DBPath,
-		"dev_http", cfg.DevHTTP,
+		"dev_http", addr,
 		"top_n", cfg.Settings.TopN,
 	)
+	logger.Info("starting dev http api", "addr", addr)
+	return http.ListenAndServe(addr, server.Handler())
+}
+
+func runResetPassword(ctx context.Context, cfg config.Config) error {
+	db, err := store.Open(ctx, cfg.DBPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.ResetPassword(ctx, cfg.Auth.BootstrapEmail, cfg.Auth.BootstrapPassword)
 }
 
 func runOnce(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
