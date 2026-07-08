@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"scalp-assist/internal/config"
+	"scalp-assist/internal/corr"
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange/binance"
 	"scalp-assist/internal/exchange/bybit"
@@ -52,13 +53,15 @@ func main() {
 }
 
 func runOnce(ctx context.Context, cfg config.Config, logger *slog.Logger) error {
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	var snapshots []domain.MarketSnapshot
 	var failures []string
+	binanceClient := binance.New()
+	bybitClient := bybit.New()
 
-	binanceSnapshot, err := binance.New().Snapshot(ctx)
+	binanceSnapshot, err := binanceClient.Snapshot(ctx)
 	if err != nil {
 		failures = append(failures, "binance: "+err.Error())
 		logger.Warn("binance snapshot failed", "error", err)
@@ -66,7 +69,7 @@ func runOnce(ctx context.Context, cfg config.Config, logger *slog.Logger) error 
 		snapshots = append(snapshots, binanceSnapshot)
 	}
 
-	bybitSnapshot, err := bybit.New().Snapshot(ctx)
+	bybitSnapshot, err := bybitClient.Snapshot(ctx)
 	if err != nil {
 		failures = append(failures, "bybit: "+err.Error())
 		logger.Warn("bybit snapshot failed", "error", err)
@@ -87,6 +90,7 @@ func runOnce(ctx context.Context, cfg config.Config, logger *slog.Logger) error 
 		return err
 	}
 	rows := metrics.BuildRows(instruments, cfg.Settings, metrics.Options{Blacklist: cfg.Blacklist})
+	rows = corr.Attach(ctx, rows, corr.Fetchers{Binance: binanceClient, Bybit: bybitClient}, corr.AttachOptions{Logger: logger})
 	top := scoring.Top(rows, cfg.Settings)
 	printTop(top, len(instruments), len(rows), failures)
 	return nil
@@ -97,16 +101,17 @@ func printTop(rows []domain.MetricsRow, scanned, filtered int, failures []string
 	if len(failures) > 0 {
 		fmt.Printf("Degraded: %s\n", strings.Join(failures, "; "))
 	}
-	fmt.Println("#  SYMBOL        EXCH   TURNOVER_24H   CHANGE%   RANGE%   INPLAY   SCORE")
+	fmt.Println("#  SYMBOL        EXCH   TURNOVER_24H   CHANGE%   RANGE%    CORR   INPLAY   SCORE")
 	for _, row := range rows {
 		exchanges := exchangeLabel(row.Instrument)
-		fmt.Printf("%-2d %-12s %-6s %12.0f %8.2f %8.2f %-8t %.4f\n",
+		fmt.Printf("%-2d %-12s %-6s %12.0f %8.2f %8.2f %7s %-8t %.4f\n",
 			row.Rank,
 			displaySymbol(row.Instrument),
 			exchanges,
 			row.TurnoverUSD,
 			row.ChangePct24h,
 			row.DayRangePct,
+			formatCorr(row.BTCCorr7d),
 			row.IsInplay,
 			row.Score,
 		)
@@ -131,4 +136,11 @@ func exchangeLabel(instrument domain.Instrument) string {
 	default:
 		return "-"
 	}
+}
+
+func formatCorr(value *float64) string {
+	if value == nil {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f", *value)
 }
