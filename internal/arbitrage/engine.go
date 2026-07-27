@@ -58,6 +58,7 @@ func Scan(quotes []domain.VenueQuote, settings model.Settings, resolver *normali
 					continue
 				}
 				net := gross - fee(settings, buy.Exchange) - fee(settings, sell.Exchange)
+				netMakerTaker := gross - makerFee(settings, buy.Exchange) - fee(settings, sell.Exchange)
 				if net < settings.MinNetSpreadBps {
 					continue
 				}
@@ -75,6 +76,7 @@ func Scan(quotes []domain.VenueQuote, settings model.Settings, resolver *normali
 					SellBid:                  sell.BidPrice,
 					GrossSpreadBps:           gross,
 					NetSpreadBps:             net,
+					NetMakerTakerBps:         netMakerTaker,
 					CapacityUSD:              capacity,
 					BuyFundingRate:           cloneFloat(buy.FundingRate),
 					SellFundingRate:          cloneFloat(sell.FundingRate),
@@ -132,6 +134,10 @@ func uniqueExchangeCount(quotes []domain.VenueQuote) int {
 
 func fee(settings model.Settings, exchange domain.Exchange) float64 {
 	return settings.FeesBps[string(exchange)]
+}
+
+func makerFee(settings model.Settings, exchange domain.Exchange) float64 {
+	return settings.MakerFeesBps[string(exchange)]
 }
 
 func capacityUSD(buy, sell domain.VenueQuote) float64 {

@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange"
@@ -15,13 +19,24 @@ import (
 )
 
 const DefaultBaseURL = "https://fapi.binance.com"
+const DefaultWSURL = "wss://fstream.binance.com/market/ws"
 
 type Client struct {
 	http           *exchange.Client
+	wsURL          string
 	contractsCache marketdata.Cache[contractsResult]
 	statsCache     marketdata.Cache[tickersResult]
 	fundingCache   marketdata.Cache[fundingResult]
 	bookCache      marketdata.Cache[bookResult]
+}
+
+type binanceKlineEvent struct {
+	Kline struct {
+		OpenTime int64  `json:"t"`
+		Symbol   string `json:"s"`
+		Close    string `json:"c"`
+		Closed   bool   `json:"x"`
+	} `json:"k"`
 }
 
 func New() *Client {
@@ -29,7 +44,7 @@ func New() *Client {
 }
 
 func NewWithBaseURL(baseURL string) *Client {
-	return &Client{http: exchange.NewClient(baseURL)}
+	return &Client{http: exchange.NewClient(baseURL), wsURL: DefaultWSURL}
 }
 
 func (c *Client) Exchange() domain.Exchange {
@@ -304,6 +319,50 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		})
 	}
 	return klines, exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"), nil
+}
+
+func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out chan<- domain.Kline) error {
+	if interval != "1m" && interval != "5m" {
+		return fmt.Errorf("unsupported Binance kline interval %q", interval)
+	}
+	conn, _, err := websocket.Dial(ctx, c.wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("connect Binance websocket: %w", err)
+	}
+	defer conn.CloseNow()
+
+	topic := strings.ToLower(symbol) + "@kline_" + interval
+	if err := wsjson.Write(ctx, conn, map[string]any{
+		"method": "SUBSCRIBE",
+		"params": []string{topic},
+		"id":     1,
+	}); err != nil {
+		return fmt.Errorf("subscribe Binance %s: %w", topic, err)
+	}
+
+	for {
+		var event binanceKlineEvent
+		if err := wsjson.Read(ctx, conn, &event); err != nil {
+			return err
+		}
+		if event.Kline.Symbol == "" || event.Kline.OpenTime == 0 {
+			continue
+		}
+		closePrice, err := parseFloat(event.Kline.Close)
+		if err != nil {
+			return fmt.Errorf("parse Binance websocket close for %s: %w", symbol, err)
+		}
+		point := domain.Kline{
+			OpenTime: time.UnixMilli(event.Kline.OpenTime),
+			Close:    closePrice,
+			Closed:   event.Kline.Closed,
+		}
+		select {
+		case out <- point:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {

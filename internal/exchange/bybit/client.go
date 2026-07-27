@@ -8,17 +8,31 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange"
 	"scalp-assist/internal/marketdata"
 )
 
 const DefaultBaseURL = "https://api.bybit.com"
+const DefaultWSURL = "wss://stream.bybit.com/v5/public/linear"
 
 type Client struct {
 	http           *exchange.Client
+	wsURL          string
 	contractsCache marketdata.Cache[contractsResult]
 	tickersCache   marketdata.Cache[tickerResponseResult]
+}
+
+type bybitKlineEvent struct {
+	Topic string `json:"topic"`
+	Data  []struct {
+		Start   int64  `json:"start"`
+		Close   string `json:"close"`
+		Confirm bool   `json:"confirm"`
+	} `json:"data"`
 }
 
 func New() *Client {
@@ -26,7 +40,7 @@ func New() *Client {
 }
 
 func NewWithBaseURL(baseURL string) *Client {
-	return &Client{http: exchange.NewClient(baseURL)}
+	return &Client{http: exchange.NewClient(baseURL), wsURL: DefaultWSURL}
 }
 
 func (c *Client) Exchange() domain.Exchange {
@@ -254,6 +268,73 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		return klines[i].OpenTime.Before(klines[j].OpenTime)
 	})
 	return klines, exchange.HeaderSubset(meta.Headers, "X-Bapi-Limit", "X-Bapi-Limit-Status", "X-Bapi-Limit-Reset-Timestamp"), nil
+}
+
+func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out chan<- domain.Kline) error {
+	wireInterval := ""
+	switch interval {
+	case "1m":
+		wireInterval = "1"
+	case "5m":
+		wireInterval = "5"
+	default:
+		return fmt.Errorf("unsupported Bybit kline interval %q", interval)
+	}
+
+	conn, _, err := websocket.Dial(ctx, c.wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("connect Bybit websocket: %w", err)
+	}
+	defer conn.CloseNow()
+
+	topic := "kline." + wireInterval + "." + symbol
+	if err := wsjson.Write(ctx, conn, map[string]any{
+		"op":   "subscribe",
+		"args": []string{topic},
+	}); err != nil {
+		return fmt.Errorf("subscribe Bybit %s: %w", topic, err)
+	}
+
+	pingCtx, stopPing := context.WithCancel(ctx)
+	defer stopPing()
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = wsjson.Write(pingCtx, conn, map[string]string{"op": "ping"})
+			}
+		}
+	}()
+
+	for {
+		var event bybitKlineEvent
+		if err := wsjson.Read(ctx, conn, &event); err != nil {
+			return err
+		}
+		if event.Topic != topic {
+			continue
+		}
+		for _, item := range event.Data {
+			closePrice, err := parseFloat(item.Close)
+			if err != nil {
+				return fmt.Errorf("parse Bybit websocket close for %s: %w", symbol, err)
+			}
+			point := domain.Kline{
+				OpenTime: time.UnixMilli(item.Start),
+				Close:    closePrice,
+				Closed:   item.Confirm,
+			}
+			select {
+			case out <- point:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
 }
 
 func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {

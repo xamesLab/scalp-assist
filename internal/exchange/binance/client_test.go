@@ -4,7 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
+	"scalp-assist/internal/domain"
 )
 
 func TestSnapshotMergesExchangeInfoTickersAndFunding(t *testing.T) {
@@ -91,6 +98,42 @@ func TestKlinesParsesOpenTimeAndClose(t *testing.T) {
 	}
 	if klines[0].Close != 1.5 || klines[1].Close != 2.5 {
 		t.Fatalf("unexpected closes: %+v", klines)
+	}
+}
+
+func TestStreamKlinesParsesUpdate(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		var subscription map[string]any
+		if err := wsjson.Read(r.Context(), conn, &subscription); err != nil {
+			return
+		}
+		_ = wsjson.Write(r.Context(), conn, map[string]any{
+			"e": "kline",
+			"k": map[string]any{"t": int64(1700000000000), "s": "BTCUSDT", "c": "101.5", "x": false},
+		})
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := New()
+	client.wsURL = "ws" + strings.TrimPrefix(server.URL, "http")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out := make(chan domain.Kline, 1)
+	go func() { _ = client.StreamKlines(ctx, "BTCUSDT", "1m", out) }()
+
+	select {
+	case point := <-out:
+		if point.Close != 101.5 || point.OpenTime.UnixMilli() != 1700000000000 || point.Closed {
+			t.Fatalf("unexpected point: %+v", point)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for Binance websocket point")
 	}
 }
 

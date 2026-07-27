@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import { ColorType, CrosshairMode, LineSeries, createChart } from 'lightweight-charts'
 import {
   ArrowLeftRight,
   ArrowRight,
@@ -56,16 +57,19 @@ const api = {
   arbitrage: (limit = 30) => api.request(`/api/arbitrage/opportunities?limit=${limit}`),
   arbitrageStats: (days = 7) => api.request(`/api/arbitrage/stats?days=${days}`),
   refreshArbitrage: () => api.request('/api/arbitrage/refresh', { method: 'POST' }),
+  arbitrageFees: () => api.request('/api/arbitrage/fees'),
+  arbitrageChartInstruments: () => api.request('/api/arbitrage/charts/instruments'),
 }
 
 function App() {
-  const [path, setPath] = useState(window.location.pathname)
+  const [path, setPath] = useState(() => `${window.location.pathname}${window.location.search}`)
   const [user, setUser] = useState(null)
   const [checked, setChecked] = useState(false)
   const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'system')
+  const pathname = new URL(path, window.location.origin).pathname
 
   useEffect(() => {
-    const onPop = () => setPath(window.location.pathname)
+    const onPop = () => setPath(`${window.location.pathname}${window.location.search}`)
     window.addEventListener('popstate', onPop)
     return () => window.removeEventListener('popstate', onPop)
   }, [])
@@ -91,9 +95,9 @@ function App() {
   }
 
   if (!checked) return <ShellLoading />
-  if (path === '/') return <Landing user={user} nav={nav} theme={theme} setTheme={setTheme} />
-  if (path === '/auth') return <AuthPage user={user} setUser={setUser} nav={nav} theme={theme} setTheme={setTheme} />
-  if (path.startsWith('/app')) {
+  if (pathname === '/') return <Landing user={user} nav={nav} theme={theme} setTheme={setTheme} />
+  if (pathname === '/auth') return <AuthPage user={user} setUser={setUser} nav={nav} theme={theme} setTheme={setTheme} />
+  if (pathname.startsWith('/app')) {
     if (!user) return <Redirect to="/auth" nav={nav} />
     return <PrivateApp path={path} nav={nav} user={user} setUser={setUser} onUnauthorized={onUnauthorized} theme={theme} setTheme={setTheme} />
   }
@@ -197,9 +201,12 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
 }
 
 function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme }) {
-  const contour = path === '/app' ? 'dashboard' : path.startsWith('/app/arbitrage') ? 'arbitrage' : 'screener'
-  const screenerView = path.endsWith('/history') ? 'history' : path.endsWith('/settings') ? 'settings' : path.endsWith('/wiki') ? 'wiki' : 'top'
-  const arbitrageView = path.endsWith('/settings') ? 'settings' : path.endsWith('/wiki') ? 'wiki' : 'list'
+  const route = new URL(path, window.location.origin)
+  const pathname = route.pathname
+  const chartInstrumentID = route.searchParams.get('instrument') || ''
+  const contour = pathname === '/app' ? 'dashboard' : pathname.startsWith('/app/arbitrage') ? 'arbitrage' : 'screener'
+  const screenerView = pathname.endsWith('/history') ? 'history' : pathname.endsWith('/settings') ? 'settings' : pathname.endsWith('/wiki') ? 'wiki' : 'top'
+  const arbitrageView = pathname.endsWith('/charts') ? 'charts' : pathname.endsWith('/info') ? 'info' : pathname.endsWith('/settings') ? 'settings' : pathname.endsWith('/wiki') ? 'wiki' : 'list'
   const logout = async () => {
     try { await api.logout() } catch {}
     setUser(null)
@@ -232,7 +239,9 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
       </>}
       {contour === 'arbitrage' && <>
         <ArbitrageNav current={arbitrageView} nav={nav} />
-        {arbitrageView === 'list' && <ArbitragePage onUnauthorized={onUnauthorized} />}
+        {arbitrageView === 'list' && <ArbitragePage onUnauthorized={onUnauthorized} nav={nav} />}
+        {arbitrageView === 'charts' && <ArbitrageChartsPage onUnauthorized={onUnauthorized} theme={theme} nav={nav} initialInstrumentID={chartInstrumentID} />}
+        {arbitrageView === 'info' && <ArbitrageInfoPage onUnauthorized={onUnauthorized} />}
         {arbitrageView === 'settings' && <div className="page empty-tab-page" role="tabpanel" aria-label="Arbitrage settings" />}
         {arbitrageView === 'wiki' && <ArbitrageWikiPage />}
       </>}
@@ -261,10 +270,401 @@ function ArbitrageNav({ current, nav }) {
     nav={nav}
     tabs={[
       { id: 'list', label: 'List', path: '/app/arbitrage' },
+      { id: 'charts', label: 'Charts', path: '/app/arbitrage/charts' },
+      { id: 'info', label: 'Info', path: '/app/arbitrage/info' },
       { id: 'settings', label: 'Settings', path: '/app/arbitrage/settings' },
       { id: 'wiki', label: 'Wiki', path: '/app/arbitrage/wiki' },
     ]}
   />
+}
+
+function ArbitrageInfoPage({ onUnauthorized }) {
+  const [fees, setFees] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api.arbitrageFees()
+      .then(setFees)
+      .catch((err) => {
+        if (err.status === 401) onUnauthorized()
+        else setError(err.message)
+      })
+  }, [])
+
+  const rates = fees?.rates || []
+  return (
+    <div className="page fee-info-page" role="tabpanel" aria-label="Arbitrage fee information">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Configured calculation inputs</div><h1>Exchange fees</h1></div>
+        <span className="updated mono">1 bps = 0.01%</span>
+      </div>
+      <p className="fee-info-lead">
+        These rates are taken from the running application configuration and are used in the Net T/T and Net M/T columns.
+      </p>
+      {error && <div className="banner">{error}</div>}
+      <div className="tblwrap">
+        <table className="tbl fee-table">
+          <thead>
+            <tr>
+              <th>Exchange</th>
+              <th className="ta-r">Maker</th>
+              <th className="ta-r">Taker</th>
+            </tr>
+          </thead>
+          <tbody>
+            {!fees && !error && Array.from({ length: 3 }).map((_, index) => <tr key={index}><td colSpan="3"><div className="skel" /></td></tr>)}
+            {rates.map((rate) => (
+              <tr key={rate.exchange}>
+                <td className="fw7">{exchangeFullLabel(rate.exchange)}</td>
+                <td className="mono ta-r">{fmtFeeRate(rate.maker_bps)}</td>
+                <td className="mono ta-r">{fmtFeeRate(rate.taker_bps)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="fee-info-note">
+        <div><span className="mono">Net T/T</span>: taker fee of the buy exchange + taker fee of the sell exchange.</div>
+        <div><span className="mono">Net M/T</span>: maker fee of the buy exchange + taker fee of the sell exchange.</div>
+        Actual account fees can differ because of VIP tier, region, rebates, promotions, or fee-token discounts.
+        Update <span className="mono">fees_bps</span> and <span className="mono">maker_fees_bps</span> in the service configuration to match the trading account.
+      </div>
+    </div>
+  )
+}
+
+const chartExchanges = [
+  ['binance', 'Binance', '#ef4444'],
+  ['bybit', 'Bybit', '#f59e0b'],
+  ['okx', 'OKX', '#3b82f6'],
+]
+const chartGrossProxyColor = '#8b5cf6'
+const chartStoredGrossColor = '#10b981'
+
+function ArbitrageChartsPage({ onUnauthorized, theme, nav, initialInstrumentID }) {
+  const containerRef = useRef(null)
+  const grossProxySeriesRef = useRef(null)
+  const [instruments, setInstruments] = useState([])
+  const [instrumentID, setInstrumentID] = useState('')
+  const [interval, setInterval] = useState('1m')
+  const [showGrossProxy, setShowGrossProxy] = useState(true)
+  const [loadingCatalog, setLoadingCatalog] = useState(true)
+  const [error, setError] = useState('')
+  const [statuses, setStatuses] = useState(() => chartStatusMap('idle'))
+  const [lastValues, setLastValues] = useState({})
+  const [lastGrossProxy, setLastGrossProxy] = useState(null)
+  const [lastStoredGross, setLastStoredGross] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let retry
+    const loadCatalog = async () => {
+      try {
+        const items = await api.arbitrageChartInstruments()
+        if (cancelled) return
+        setInstruments(items || [])
+        setInstrumentID((current) => current || preferredChartInstrument(items || []))
+        setError('')
+        if (!items?.length) retry = window.setTimeout(loadCatalog, 2500)
+      } catch (err) {
+        if (cancelled) return
+        if (err.status === 401) onUnauthorized()
+        else setError(err.message)
+      } finally {
+        if (!cancelled) setLoadingCatalog(false)
+      }
+    }
+    loadCatalog()
+    return () => {
+      cancelled = true
+      window.clearTimeout(retry)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (initialInstrumentID && instruments.some((item) => item.id === initialInstrumentID)) {
+      setInstrumentID(initialInstrumentID)
+    }
+  }, [initialInstrumentID, instruments])
+
+  useEffect(() => {
+    grossProxySeriesRef.current?.applyOptions({ visible: showGrossProxy })
+  }, [showGrossProxy])
+
+  useEffect(() => {
+    if (!containerRef.current || !instrumentID) return undefined
+
+    const style = getComputedStyle(document.documentElement)
+    const background = style.getPropertyValue('--panel').trim() || '#ffffff'
+    const text = style.getPropertyValue('--muted').trim() || '#68746e'
+    const grid = style.getPropertyValue('--line').trim() || '#d9e0dc'
+    const chartHeight = window.innerWidth <= 720 ? 500 : 600
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: chartHeight,
+      layout: {
+        background: { type: ColorType.Solid, color: background },
+        textColor: text,
+        fontFamily: '"IBM Plex Mono", ui-monospace, monospace',
+        attributionLogo: true,
+        panes: {
+          separatorColor: grid,
+          separatorHoverColor: text,
+          enableResize: true,
+        },
+      },
+      grid: {
+        vertLines: { color: grid },
+        horzLines: { color: grid },
+      },
+      crosshair: { mode: CrosshairMode.Normal },
+      rightPriceScale: { borderColor: grid },
+      timeScale: {
+        borderColor: grid,
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      localization: { priceFormatter: (value) => fmtChartPrice(value) },
+    })
+    const series = {}
+    chartExchanges.forEach(([exchange, label, color]) => {
+      series[exchange] = chart.addSeries(LineSeries, {
+        title: label,
+        color,
+        lineWidth: 2,
+        priceLineVisible: false,
+        lastValueVisible: true,
+      })
+    })
+    const storedGrossSeries = chart.addSeries(LineSeries, {
+      title: 'Gross (saved bid/ask)',
+      color: chartStoredGrossColor,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      priceFormat: {
+        type: 'custom',
+        minMove: 0.1,
+        formatter: (value) => `${Number(value).toFixed(1)} bps`,
+      },
+    }, 1)
+    const grossProxySeries = chart.addSeries(LineSeries, {
+      title: 'Gross proxy',
+      color: chartGrossProxyColor,
+      lineWidth: 2,
+      lineStyle: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      visible: showGrossProxy,
+      priceFormat: {
+        type: 'custom',
+        minMove: 0.1,
+        formatter: (value) => `${Number(value).toFixed(1)} bps`,
+      },
+    }, 1)
+    grossProxySeriesRef.current = grossProxySeries
+    storedGrossSeries.createPriceLine({
+      price: 0,
+      color: grid,
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: true,
+      title: '0',
+    })
+    const panes = chart.panes()
+    if (panes[0] && panes[1]) {
+      panes[0].setHeight(chartHeight - 180)
+      panes[1].setHeight(150)
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect?.width
+      if (width) chart.applyOptions({ width })
+    })
+    observer.observe(containerRef.current)
+
+    let active = true
+    const closeValuesByTime = new Map()
+    const storedGrossByTime = new Map()
+    setStatuses(chartStatusMap('connecting'))
+    setLastValues({})
+    setLastGrossProxy(null)
+    setLastStoredGross(null)
+    setError('')
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const query = new URLSearchParams({ instrument: instrumentID, interval })
+    const socket = new WebSocket(`${protocol}//${window.location.host}/api/arbitrage/charts/stream?${query}`)
+    socket.onmessage = (message) => {
+      if (!active) return
+      try {
+        const payload = JSON.parse(message.data)
+        if (payload.type === 'snapshot') {
+          const values = {}
+          chartExchanges.forEach(([exchange]) => {
+            const points = (payload.series?.[exchange] || []).map(chartValuePoint)
+            series[exchange].setData(points)
+            points.forEach((point) => storeChartClose(closeValuesByTime, exchange, point))
+            if (points.length) values[exchange] = points[points.length - 1].value
+          })
+          const grossProxyPoints = chartGrossProxyPoints(closeValuesByTime)
+          grossProxySeries.setData(grossProxyPoints)
+          setLastGrossProxy(grossProxyPoints[grossProxyPoints.length - 1]?.value ?? null)
+          const storedGrossPoints = (payload.stored_gross || []).map(chartValuePoint)
+          storedGrossPoints.forEach((point) => storedGrossByTime.set(point.time, point.value))
+          storedGrossSeries.setData(storedGrossPoints)
+          setLastStoredGross(storedGrossPoints[storedGrossPoints.length - 1]?.value ?? null)
+          setLastValues(values)
+          if (payload.errors) {
+            setStatuses((current) => {
+              const next = { ...current }
+              Object.keys(payload.errors).forEach((exchange) => { next[exchange] = 'degraded' })
+              return next
+            })
+          }
+          chart.timeScale().fitContent()
+        } else if (payload.type === 'bar' && series[payload.exchange] && payload.point) {
+          const point = chartValuePoint(payload.point)
+          series[payload.exchange].update(point)
+          const grossProxyPoint = storeChartClose(closeValuesByTime, payload.exchange, point)
+          if (grossProxyPoint) {
+            grossProxySeries.update(grossProxyPoint)
+            setLastGrossProxy(grossProxyPoint.value)
+          }
+          setLastValues((current) => ({ ...current, [payload.exchange]: point.value }))
+        } else if (payload.type === 'gross' && payload.point) {
+          const point = chartValuePoint(payload.point)
+          const current = storedGrossByTime.get(point.time)
+          if (current == null || point.value > current) {
+            storedGrossByTime.set(point.time, point.value)
+            storedGrossSeries.update(point)
+            setLastStoredGross(point.value)
+          }
+        } else if (payload.type === 'status' && payload.exchange) {
+          setStatuses((current) => ({ ...current, [payload.exchange]: payload.status }))
+        } else if (payload.type === 'error') {
+          setError(payload.error || 'Chart stream error')
+        }
+      } catch {
+        setError('Invalid chart stream response')
+      }
+    }
+    socket.onerror = () => {
+      if (active) setError('Chart WebSocket connection failed')
+    }
+    socket.onclose = () => {
+      if (active) setStatuses(chartStatusMap('disconnected'))
+    }
+
+    return () => {
+      active = false
+      socket.close()
+      observer.disconnect()
+      if (grossProxySeriesRef.current === grossProxySeries) grossProxySeriesRef.current = null
+      chart.remove()
+    }
+  }, [instrumentID, interval, theme])
+
+  const selected = instruments.find((item) => item.id === instrumentID)
+  return (
+    <div className="page chart-page" role="tabpanel" aria-label="Arbitrage charts">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Cross-exchange prices</div><h1>Charts</h1></div>
+        <span className="updated mono">{interval} close price</span>
+      </div>
+      <div className="chart-controls">
+        <label className="chart-control">
+          <span>Common pair</span>
+          <select
+            className="select chart-pair-select"
+            value={instrumentID}
+            disabled={loadingCatalog || !instruments.length}
+            onChange={(event) => {
+              const nextInstrumentID = event.target.value
+              setInstrumentID(nextInstrumentID)
+              nav(`/app/arbitrage/charts?instrument=${encodeURIComponent(nextInstrumentID)}`)
+            }}
+          >
+            {!instruments.length && <option value="">{loadingCatalog ? 'Loading pairs…' : 'No common pairs'}</option>}
+            {instruments.map((item) => <option value={item.id} key={item.id}>{displayArbitrageSymbol(item.instrument)}</option>)}
+          </select>
+        </label>
+        <div className="chart-control">
+          <span>Period</span>
+          <div className="chart-period" role="group" aria-label="Chart period">
+            {['1m', '5m'].map((value) => <button className={interval === value ? 'on' : ''} type="button" onClick={() => setInterval(value)} key={value}>{value}</button>)}
+          </div>
+        </div>
+        <label className="chk fx ac gap6 chart-gross-toggle">
+          <input type="checkbox" checked={showGrossProxy} onChange={(event) => setShowGrossProxy(event.target.checked)} />
+          Approximate Gross
+        </label>
+      </div>
+      {error && <div className="banner">{error}</div>}
+      {!loadingCatalog && !instruments.length && !error && <div className="banner">The common three-exchange catalog is warming up. This page will retry automatically.</div>}
+      <section className="chart-panel">
+        <div className="chart-legend">
+          {chartExchanges.map(([exchange, label, color]) => (
+            <div className="chart-legend-item" key={exchange}>
+              <span className="chart-series-dot" style={{ background: color }} />
+              <span className="fw6">{label}</span>
+              <span className="mono">{lastValues[exchange] == null ? '—' : fmtChartPrice(lastValues[exchange])}</span>
+              <span className={`chart-stream-status ${statuses[exchange] || 'idle'}`}>{statuses[exchange] || 'idle'}</span>
+            </div>
+          ))}
+          <div className="chart-legend-item">
+            <span className="chart-series-dot" style={{ background: chartStoredGrossColor }} />
+            <span className="fw6">Saved Gross</span>
+            <span className="mono">{lastStoredGross == null ? '—' : `${lastStoredGross.toFixed(1)} bps`}</span>
+            <span className="chart-stream-status saved">bid/ask</span>
+          </div>
+          {showGrossProxy && <div className="chart-legend-item chart-gross-proxy">
+            <span className="chart-series-dot" style={{ background: chartGrossProxyColor }} />
+            <span className="fw6">Gross proxy</span>
+            <span className="mono">{lastGrossProxy == null ? '—' : `${lastGrossProxy.toFixed(1)} bps`}</span>
+            <span className="chart-stream-status proxy">close</span>
+          </div>}
+        </div>
+        <div className="chart-canvas" ref={containerRef} />
+        {selected && <div className="chart-symbols mono">{chartExchanges.map(([exchange, label]) => `${label}: ${selected.symbols?.[exchange] || '—'}`).join(' · ')}</div>}
+      </section>
+    </div>
+  )
+}
+
+function chartStatusMap(status) {
+  return Object.fromEntries(chartExchanges.map(([exchange]) => [exchange, status]))
+}
+
+function preferredChartInstrument(items) {
+  return items.find((item) => item.instrument?.base === 'BTC' && item.instrument?.multiplier === 1)?.id || items[0]?.id || ''
+}
+
+function chartValuePoint(point) {
+  return { time: Number(point.time), value: Number(point.value) }
+}
+
+function storeChartClose(valuesByTime, exchange, point) {
+  if (!Number.isFinite(point.time) || !Number.isFinite(point.value) || point.value <= 0) return null
+  const values = valuesByTime.get(point.time) || {}
+  values[exchange] = point.value
+  valuesByTime.set(point.time, values)
+  return chartGrossProxyPoint(point.time, values)
+}
+
+function chartGrossProxyPoints(valuesByTime) {
+  return [...valuesByTime.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([time, values]) => chartGrossProxyPoint(time, values))
+    .filter(Boolean)
+}
+
+function chartGrossProxyPoint(time, values) {
+  const prices = chartExchanges.map(([exchange]) => Number(values[exchange]))
+  if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return null
+  return {
+    time: Number(time),
+    value: (Math.max(...prices) / Math.min(...prices) - 1) * 10000,
+  }
 }
 
 function ContourTabs({ label, current, nav, tabs }) {
@@ -292,21 +692,40 @@ function ContourTabs({ label, current, nav, tabs }) {
 function DashboardPage({ nav, onUnauthorized }) {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    api.dashboard()
-      .then(setSummary)
-      .catch((err) => err.status === 401 ? onUnauthorized() : setError(err.message))
-  }, [])
+  const load = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setSummary(await api.dashboard())
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
 
   const screener = summary?.screener || {}
   const arb = summary?.arbitrage || {}
   const exchanges = Object.entries(arb.exchanges || {})
+  const scoreRows = screener.top_score || []
+  const scoreMore = Math.max(0, Number(screener.rows || 0) - scoreRows.length)
+  const positiveRows = arb.positive_opportunities || []
+  const positiveMore = Math.max(0, Number(arb.positive_total || 0) - positiveRows.length)
   return (
     <div className="page">
       <div className="page-heading">
         <div><div className="page-kicker mono">Workspace</div><h1>Overview</h1></div>
-        <span className="updated mono">{latestTime(screener.updated_at, arb.updated_at)}</span>
+        <div className="fx ac gap12">
+          <span className="updated mono">{latestTime(screener.updated_at, arb.updated_at)}</span>
+          <button className="btn" type="button" disabled={loading} onClick={load}>
+            {loading && <span className="spinner" />}<RefreshCw size={15} />Refresh cards
+          </button>
+        </div>
       </div>
       {error && <div className="banner">{error}</div>}
       <div className="contour-grid">
@@ -314,6 +733,19 @@ function DashboardPage({ nav, onUnauthorized }) {
           <div className="contour-head"><BarChart3 size={20} /><div><div className="sec-h">Screener</div><div className="dim fs13 mono">{formatUpdated(screener.updated_at)}</div></div></div>
           <div className="contour-value">{screener.rows ?? 0}</div>
           <div className="dim">ranked instruments</div>
+          <div className="overview-arb-list">
+            <div className="overview-arb-row overview-score-row overview-arb-header">
+              <span>Ticker</span><span>Score</span>
+            </div>
+            {scoreRows.map((item) => (
+              <div className="overview-arb-row overview-score-row" key={displaySymbol(item.instrument)}>
+                <span className="mono fw6">{displaySymbol(item.instrument)}</span>
+                <span className="mono fw7 score">{Number(item.score || 0).toFixed(4)}</span>
+              </div>
+            ))}
+            {!scoreRows.length && <div className="overview-arb-empty">No ranked instruments.</div>}
+            {scoreMore > 0 && <div className="overview-arb-more mono">+{scoreMore} more on Screener</div>}
+          </div>
           <button className="btn contour-open" onClick={() => nav('/app/screener')}>Open screener <ArrowRight size={16} /></button>
         </section>
         <section className="contour-panel">
@@ -321,6 +753,21 @@ function DashboardPage({ nav, onUnauthorized }) {
           <div className="contour-value">{arb.opportunities ?? 0}</div>
           <div className="dim">{arb.instruments ?? 0} common instruments</div>
           <div className="exchange-states">{exchanges.map(([name, state]) => <span className={`exchange-state ${state.ok ? 'ok' : 'bad'}`} key={name}><span className="status-dot" />{exchangeLabel(name)}</span>)}</div>
+          <div className="overview-arb-list">
+            <div className="overview-arb-row overview-arb-header">
+              <span>Ticker</span><span>Route</span><span>Net T/T</span><span>Active</span>
+            </div>
+            {positiveRows.map((item) => (
+              <div className="overview-arb-row" key={`${displayArbitrageSymbol(item.instrument)}-${item.buy_exchange}-${item.sell_exchange}`}>
+                <span className="mono fw6">{displayArbitrageSymbol(item.instrument)}</span>
+                <span className="overview-arb-route mono">{exchangeLabel(item.buy_exchange)} <ArrowRight size={12} /> {exchangeLabel(item.sell_exchange)}</span>
+                <span className="mono fw7 pos">{fmtBps(item.net_spread_bps)}</span>
+                <span className="mono">{fmtDuration(item.first_seen_at, item.observed_at)}</span>
+              </div>
+            ))}
+            {!positiveRows.length && <div className="overview-arb-empty">No positive Net T/T opportunities.</div>}
+            {positiveMore > 0 && <div className="overview-arb-more mono">+{positiveMore} more positive on List</div>}
+          </div>
           <button className="btn contour-open" onClick={() => nav('/app/arbitrage')}>Open arbitrage <ArrowRight size={16} /></button>
         </section>
       </div>
@@ -328,7 +775,7 @@ function DashboardPage({ nav, onUnauthorized }) {
   )
 }
 
-function ArbitragePage({ onUnauthorized }) {
+function ArbitragePage({ onUnauthorized, nav }) {
   const [run, setRun] = useState(null)
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -389,22 +836,34 @@ function ArbitragePage({ onUnauthorized }) {
       {error && <div className="banner">{error}</div>}
       <div className="tblwrap">
         <table className="tbl arb-table">
-          <thead><tr><th>Ticker</th><th>Route</th><th className="ta-r">Buy ask</th><th className="ta-r">Sell bid</th><th className="ta-r">Gross</th><th className="ta-r">Net</th><th className="ta-r">Top capacity</th><th className="ta-r">Funding / h</th><th className="ta-r">Active</th></tr></thead>
+          <thead><tr><th>Ticker</th><th>Route</th><th className="ta-r">Buy ask</th><th className="ta-r">Sell bid</th><th className="ta-r">Gross</th><th className="ta-r" title="Taker on both exchanges">Net T/T</th><th className="ta-r" title="Maker on the buy exchange, taker on the sell exchange">Net M/T</th><th className="ta-r">Top capacity</th><th className="ta-r">Funding / h</th><th className="ta-r">Active</th></tr></thead>
           <tbody>
-            {loading && !run ? Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan="9"><div className="skel" /></td></tr>) : rows.map((item) => (
-              <tr key={`${displayArbitrageSymbol(item.instrument)}-${item.buy_exchange}-${item.sell_exchange}`}>
-                <td className="fw6 mono">{displayArbitrageSymbol(item.instrument)}</td>
+            {loading && !run ? Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan="10"><div className="skel" /></td></tr>) : rows.map((item) => (
+              <tr className="arb-list-row" key={`${displayArbitrageSymbol(item.instrument)}-${item.buy_exchange}-${item.sell_exchange}`}>
+                <td className="fw6 mono">
+                  <a
+                    className="ticker-chart-link"
+                    href={`/app/arbitrage/charts?instrument=${encodeURIComponent(arbitrageChartInstrumentID(item.instrument))}`}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      nav(event.currentTarget.getAttribute('href'))
+                    }}
+                  >
+                    {displayArbitrageSymbol(item.instrument)}
+                  </a>
+                </td>
                 <td><span className="arb-route"><span className="badge">{exchangeLabel(item.buy_exchange)}</span><ArrowRight size={14} /><span className="badge">{exchangeLabel(item.sell_exchange)}</span></span></td>
                 <td className="mono ta-r">{fmtPrice(item.buy_ask)}</td>
                 <td className="mono ta-r">{fmtPrice(item.sell_bid)}</td>
                 <td className="mono ta-r">{fmtBps(item.gross_spread_bps)}</td>
                 <td className={`mono ta-r fw7 ${item.net_spread_bps > 0 ? 'pos' : 'neg'}`}>{fmtBps(item.net_spread_bps)}</td>
+                <td className={`mono ta-r fw7 ${item.net_maker_taker_bps > 0 ? 'pos' : 'neg'}`}>{fmtBps(item.net_maker_taker_bps)}</td>
                 <td className="mono ta-r">{fmtMoney(item.capacity_usd)}</td>
                 <td className="mono ta-r">{item.funding_edge_bps_hour == null ? 'n/a' : fmtBps(item.funding_edge_bps_hour)}</td>
                 <td className="mono ta-r">{fmtDuration(item.first_seen_at, item.observed_at)}</td>
               </tr>
             ))}
-            {!loading && rows.length === 0 && <tr><td colSpan="9" className="empty-cell">No spreads match the current thresholds.</td></tr>}
+            {!loading && rows.length === 0 && <tr><td colSpan="10" className="empty-cell">No spreads match the current thresholds.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -419,7 +878,8 @@ function ArbitrageWikiPage() {
     ['Buy ask', 'Лучшая доступная цена продажи в стакане биржи покупки. По этой цене предполагается открыть long.'],
     ['Sell bid', 'Лучшая доступная цена покупки в стакане биржи продажи. По этой цене предполагается открыть short.'],
     ['Gross', 'Разница между Sell bid и Buy ask до комиссий, в базисных пунктах. 1 bps = 0,01%.'],
-    ['Net', 'Gross за вычетом предполагаемых taker-комиссий обеих бирж. Funding, проскальзывание и задержка исполнения сюда не входят.'],
+    ['Net T/T', 'Gross за вычетом предполагаемых taker-комиссий обеих бирж. По этому значению выполняются фильтрация и сортировка.'],
+    ['Net M/T', 'Gross за вычетом maker-комиссии биржи покупки и taker-комиссии биржи продажи. Исполнение maker-ордера не гарантируется. Funding, проскальзывание и задержка исполнения сюда не входят.'],
     ['Top capacity', 'Максимальный долларовый объём, видимый одновременно на первом уровне Ask и Bid. Это не полная глубина стакана.'],
     ['Funding / h', 'Оценка разницы funding выбранного long/short-направления, приведённая к одному часу. Положительное значение благоприятно для маршрута, n/a означает недостаток данных.'],
     ['Active', 'Сколько времени это же направление непрерывно остаётся в текущем списке. После длительного исчезновения отсчёт начинается заново.'],
@@ -433,6 +893,56 @@ function ArbitrageWikiPage() {
         Страница List сравнивает бессрочные USDT-фьючерсы Binance, Bybit и OKX и показывает направления,
         где цена покупки на одной бирже ниже цены продажи на другой.
       </p>
+
+      <section className="wiki-section">
+        <h2>List и переход к графику</h2>
+        <p>
+          При наведении строка таблицы подсвечивается. Нажмите на тикер в первом столбце, чтобы открыть вкладку Charts
+          сразу с выбранным инструментом. Выбранная пара записывается в адрес страницы, поэтому сохраняется после
+          обновления и корректно восстанавливается при навигации назад или вперёд.
+        </p>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Info</h2>
+        <p>
+          Вкладка Info показывает maker- и taker-комиссии из текущей конфигурации сервиса, а также суммы,
+          используемые для сценариев Net M/T и Net T/T. Это расчётные настройки приложения, а не автоматически
+          полученный тариф биржевого аккаунта: VIP-уровень, региональные условия, скидки и rebates нужно учитывать
+          вручную в конфигурации.
+        </p>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Charts</h2>
+        <p>
+          Вкладка Charts строит три линии цены закрытия свечи выбранного контракта: Binance, Bybit и OKX.
+          В селектор попадают только USDT perpetual-контракты, одновременно найденные на всех трёх биржах.
+          Доступны интервалы 1 и 5 минут.
+        </p>
+        <p>
+          Binance показан красной линией, Bybit — оранжевой, OKX — синей. Точки всех бирж привязаны к началу
+          соответствующей минутной свечи, чтобы линии сравнивались на общей временной шкале без визуального сдвига.
+          Выбор другой пары в селекторе также обновляет адрес страницы.
+        </p>
+        <p>
+          В нижней синхронной панели зелёная линия Saved Gross строится по сохранённым Buy ask и Sell bid:
+          <span className="mono"> (Sell bid / Buy ask − 1) × 10 000</span>. Для каждой минуты показывается лучшее
+          сохранённое направление. Линия может иметь разрывы, если инструмент не прошёл фильтры List или в этот
+          период не было сохранённой возможности.
+        </p>
+        <p>
+          Фиолетовая пунктирная линия Gross proxy рассчитывается по close-ценам:
+          <span className="mono"> (max close / min close − 1) × 10 000</span>. Она строится только для свечей,
+          доступных одновременно у всех трёх бирж, и не является исполнимым Gross по стакану. Чекбокс
+          Approximate Gross над графиком включает или скрывает эту линию; Saved Gross отображается всегда.
+        </p>
+        <p>
+          История загружается через публичные REST API, а открытая свеча обновляется через WebSocket.
+          Эти линии показывают последнюю цену сделки внутри свечи, а не лучшие Bid/Ask из таблицы List,
+          поэтому график нельзя использовать для самостоятельного пересчёта арбитражного Net.
+        </p>
+      </section>
 
       <section className="wiki-section">
         <h2>Порядок работы</h2>
@@ -450,8 +960,8 @@ function ArbitrageWikiPage() {
         <dl className="wiki-terms">
           <dt>Common instruments</dt><dd>Количество нормализованных контрактов, найденных минимум на двух доступных биржах.</dd>
           <dt>Visible spreads</dt><dd>Число направлений, прошедших текущие фильтры spread, свежести и ликвидности.</dd>
-          <dt>Net positive</dt><dd>Количество строк с положительным Net после заложенных комиссий.</dd>
-          <dt>7d max net</dt><dd>Максимальный сохранённый Net за последние семь дней.</dd>
+          <dt>Net positive</dt><dd>Количество строк с положительным Net T/T после двух taker-комиссий.</dd>
+          <dt>7d max net</dt><dd>Максимальный сохранённый Net T/T за последние семь дней.</dd>
         </dl>
       </section>
 
@@ -470,14 +980,16 @@ function ArbitrageWikiPage() {
       <section className="wiki-section">
         <h2>Формулы</h2>
         <div className="wiki-formula mono">Gross = (Sell bid / Buy ask - 1) × 10 000 bps</div>
-        <div className="wiki-formula mono">Net = Gross - комиссия покупки - комиссия продажи</div>
+        <div className="wiki-formula mono">Net T/T = Gross - taker покупки - taker продажи</div>
+        <div className="wiki-formula mono">Net M/T = Gross - maker покупки - taker продажи</div>
         <div className="wiki-formula mono">Top capacity = min(Ask qty в base × Ask, Bid qty в base × Bid)</div>
       </section>
 
       <section className="wiki-section wiki-warning">
         <h2>Важно</h2>
         <p>
-          Положительный Net — это индикатор, а не гарантия исполнимой прибыли. Данные поступают через REST,
+          Положительный Net — это индикатор, а не гарантия исполнимой прибыли. Maker-ордер может не исполниться,
+          а данные поступают через REST,
           котировки двух бирж могут измениться между запросом и сделкой, а доступный объём может исчезнуть.
           Перед любым решением вручную учитывайте проскальзывание, реальные комиссии, funding, ограничения
           контрактов и риск неполного исполнения одной стороны.
@@ -957,9 +1469,22 @@ function displayArbitrageSymbol(instrument = {}) {
   return `${multiplier === 1 ? '' : multiplier}${base}${quote}`
 }
 
+function arbitrageChartInstrumentID(instrument = {}) {
+  const base = instrument.base || ''
+  const quote = instrument.quote || 'USDT'
+  const multiplier = instrument.multiplier || 1
+  const kind = instrument.kind || 'linear_perpetual'
+  return `${base}:${quote}:${multiplier}:${kind}`
+}
+
 function exchangeLabel(exchange = '') {
   const labels = { binance: 'BN', bybit: 'BB', okx: 'OKX' }
   return labels[String(exchange).toLowerCase()] || String(exchange).toUpperCase()
+}
+
+function exchangeFullLabel(exchange = '') {
+  const labels = { binance: 'Binance', bybit: 'Bybit', okx: 'OKX' }
+  return labels[String(exchange).toLowerCase()] || String(exchange)
 }
 
 function formatUpdated(value) {
@@ -975,6 +1500,11 @@ function latestTime(...values) {
 
 function fmtBps(value = 0) {
   return `${Number(value || 0).toFixed(1)} bps`
+}
+
+function fmtFeeRate(value = 0) {
+  const bps = Number(value || 0)
+  return `${bps.toFixed(2)} bps (${(bps / 100).toFixed(3)}%)`
 }
 
 function fmtDuration(from, to) {
@@ -999,6 +1529,14 @@ function fmtPrice(value = 0) {
   if (value >= 100) return Number(value).toFixed(2)
   if (value >= 1) return Number(value).toFixed(4)
   return Number(value).toPrecision(4)
+}
+
+function fmtChartPrice(value = 0) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  if (number >= 1000) return number.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  if (number >= 1) return number.toLocaleString(undefined, { maximumFractionDigits: 5 })
+  return number.toPrecision(6)
 }
 
 createRoot(document.getElementById('root')).render(<App />)

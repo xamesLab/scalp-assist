@@ -31,6 +31,9 @@ func TestScanCalculatesDirectionalNetSpreadAndCapacity(t *testing.T) {
 	if got.GrossSpreadBps != 200 || got.NetSpreadBps != 190 {
 		t.Fatalf("spreads = gross %v net %v", got.GrossSpreadBps, got.NetSpreadBps)
 	}
+	if got.NetMakerTakerBps != 193 {
+		t.Fatalf("maker/taker net = %v, want 193", got.NetMakerTakerBps)
+	}
 	if got.CapacityUSD != 204 {
 		t.Fatalf("capacity = %v, want 204", got.CapacityUSD)
 	}
@@ -107,5 +110,6 @@ func testSettings() model.Settings {
 		MaxQuoteSkew:      10 * time.Second,
 		TopN:              20,
 		FeesBps:           map[string]float64{"binance": 5, "bybit": 5, "okx": 5},
+		MakerFeesBps:      map[string]float64{"binance": 2, "bybit": 2, "okx": 2},
 	}
 }

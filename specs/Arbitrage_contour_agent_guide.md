@@ -1,6 +1,6 @@
 # Контур «Арбитраж»: техническое описание для кодового агента
 
-**Версия:** 1.0
+**Версия:** 1.1
 
 **Дата:** 27.07.2026
 
@@ -30,6 +30,7 @@ funding.
 | Модели | `internal/arbitrage/model` | Settings, Opportunity, Run и Stats |
 | Чистый расчёт | `internal/arbitrage/engine.go` | Grouping, направления, filters и ranking |
 | Оркестрация | `internal/arbitrage/service.go` | Fetch, degraded mode, funding enrichment и persistence |
+| Графики | `internal/arbitrage/charts.go` | Каталог общих инструментов, history bootstrap и общий WebSocket stream |
 | Общие quote | `internal/domain/types.go` | `InstrumentKey`, `VenueQuote`, `FundingInfo` |
 | Кэш | `internal/marketdata` | TTL cache, keyed cache и request coalescing |
 | Нормализация | `internal/normalize.Resolver` | ContractSpec → identity |
@@ -38,6 +39,7 @@ funding.
 | OKX | `internal/exchange/okx` | Catalog, BBO и точечный funding |
 | Хранилище | `internal/store/arbitrage.go` | Runs, opportunities, stats и retention |
 | Миграция | `internal/store/migrations/002_arbitrage.sql` | Таблицы контура |
+| Миграция | `internal/store/migrations/003_arbitrage_maker_taker_net.sql` | Дополнительный Net maker+taker |
 | API | `internal/api/api.go` | Current run, stats и refresh |
 | UI | `web/src/main.jsx` | Вкладки List, Settings и Wiki в `/app/arbitrage/*` |
 
@@ -144,6 +146,20 @@ Binance и Bybit client instances общие со скринером. Созда
 кэша. Одновременные cache miss одного ключа должны объединяться в один HTTP
 fetch.
 
+### WebSocket-графики
+
+Графики используют публичные kline/candlestick streams без API keys:
+
+- Binance: routed USDⓈ-M stream `<symbol>@kline_1m|5m`;
+- Bybit: linear topic `kline.{1|5}.{symbol}`;
+- OKX: business WebSocket channel `candle1m|candle5m`.
+
+Начальная история загружается REST-методами klines, затем текущая свеча
+обновляется через WebSocket. Значение линии — `close` биржевой свечи, а не BBO.
+Один shared stream переиспользуется всеми браузерными подписчиками одинакового
+`(instrument, interval)`. После обрыва upstream соединение восстанавливается с
+backoff.
+
 ## 6. Идентичность контракта
 
 Ключ арбитража строже скринера:
@@ -210,13 +226,20 @@ net_spread_bps =
     gross_spread_bps
   - fee_bps[buy_exchange]
   - fee_bps[sell_exchange]
+
+net_maker_taker_bps =
+    gross_spread_bps
+  - maker_fee_bps[buy_exchange]
+  - fee_bps[sell_exchange]
 ```
 
-Комиссии являются предположением taker+taker и задаются в bps. Если карта не
-содержит биржу, текущий helper возвращает ноль. Дефолт содержит все три биржи,
-но текущая validation проверяет только переданные ключи и не отклоняет неполную
-карту. Поэтому не удалять Binance/Bybit/OKX из `fees_bps`; при изменении
-валидации добавить тест на обязательность всех трёх ключей.
+`net_spread_bps` предполагает taker+taker и остаётся основой фильтрации,
+сортировки и статистики. `net_maker_taker_bps` — дополнительный сценарий:
+покупающая биржа считается maker, продающая — taker. Исполнение maker-ордера не
+гарантируется. Комиссии задаются в bps. Если карта не содержит биржу, helper
+возвращает ноль. Дефолт содержит все три биржи, но validation проверяет только
+переданные ключи и не отклоняет неполную карту. Поэтому не удалять
+Binance/Bybit/OKX из `fees_bps` и `maker_fees_bps`.
 
 ### Capacity
 
@@ -309,6 +332,10 @@ Current run хранится в памяти и клонируется при ч
   инструментов и opportunities;
 - `arbitrage_opportunities` — рассчитанные направления run.
 
+Миграция `003_arbitrage_maker_taker_net.sql` добавляет nullable-колонку
+`net_maker_taker_bps`. Для старых записей чтение использует `net_spread_bps` как
+консервативный fallback.
+
 Удаление выполняется по `arbitrage_runs.observed_at < cutoff`; дочерние строки
 удаляются через `ON DELETE CASCADE`. Retention по умолчанию 30 дней.
 
@@ -336,6 +363,10 @@ arbitrage:
     binance: 5
     bybit: 5.5
     okx: 5
+  maker_fees_bps:
+    binance: 2
+    bybit: 2
+    okx: 2
 ```
 
 Арбитражные настройки пока читаются только из YAML и требуют рестарта.
@@ -349,7 +380,7 @@ arbitrage:
 - top-N `1..200`;
 - funding candidates `0..top_n`;
 - retention `1..3650`;
-- известные комиссии неотрицательны.
+- известные taker- и maker-комиссии неотрицательны.
 
 Значение `min_net_spread_bps = -20` позволяет наблюдать близкие к безубыточности
 маршруты. Это не утверждение об их прибыльности.
@@ -363,7 +394,10 @@ arbitrage:
 | GET | `/api/arbitrage/opportunities?limit=` | Полный `Run`, limit обрезает opportunities |
 | GET | `/api/arbitrage/stats?days=7` | Runs, observations, avg/max net, profitable count и routes |
 | POST | `/api/arbitrage/refresh` | Синхронный внеплановый scan |
-| GET | `/api/dashboard/summary` | Краткие числа обоих контуров |
+| GET | `/api/arbitrage/fees` | Текущие maker/taker-комиссии из конфигурации сервиса |
+| GET | `/api/arbitrage/charts/instruments` | Контракты, одновременно доступные на всех трёх биржах |
+| WS | `/api/arbitrage/charts/stream?instrument=&interval=` | History snapshot с сохранённым Gross и live candle/status/gross events |
+| GET | `/api/dashboard/summary` | Краткие числа и до пяти top-строк каждого контура |
 
 `POST /refresh` возвращает conflict при активном refresh или ошибке получения
 минимум двух бирж.
@@ -371,6 +405,8 @@ arbitrage:
 UI использует общий для контуров компонент вкладок:
 
 - `/app/arbitrage` — List с текущим рабочим содержимым;
+- `/app/arbitrage/charts` — три линии close Binance/Bybit/OKX и нижняя панель Gross с периодом 1m или 5m;
+- `/app/arbitrage/info` — настроенные maker/taker-комиссии и суммы M/T, T/T;
 - `/app/arbitrage/settings` — пустая зарезервированная область;
 - `/app/arbitrage/wiki` — русскоязычная пользовательская справка по List,
   столбцам, формулам и ограничениям.
@@ -386,8 +422,24 @@ UI использует общий для контуров компонент в
 - funding edge;
 - длительность с `first_seen_at`.
 
-Frontend не должен самостоятельно пересчитывать spread: backend является
-единственным источником формул и фильтров.
+Карточка Arbitrage на Overview показывает не более пяти строк с положительным
+`net_spread_bps`: ticker, route, Net T/T и Active. API дополнительно возвращает
+`positive_total`, чтобы UI мог указать количество остальных положительных строк.
+Карточка Screener показывает не более пяти инструментов с максимальным Score и
+число остальных строк последнего snapshot. Кнопка `Refresh cards` повторно
+читает summary, но не запускает внеплановые рыночные scan.
+
+Frontend не должен самостоятельно пересчитывать исполнимый spread: backend
+является единственным источником формул и фильтров. Исключение — явно
+обозначенный визуальный `Gross proxy` по close-ценам.
+
+Charts не заменяет List: линии отражают last-trade close свечей, тогда как
+возможности List рассчитываются по синхронизированным best ask/bid.
+Нижняя панель всегда показывает лучший сохранённый в минутной корзине Gross,
+рассчитанный из `sell_bid / buy_ask`. Опциональная линия Gross proxy считается
+на frontend из максимального и минимального close трёх бирж; её можно скрыть
+чекбоксом `Approximate Gross`. Разрывы сохранённого Gross ожидаемы: в таблицу
+попадают только прошедшие фильтры opportunities с частотой `history_interval`.
 
 При изменении колонок, формул или трактовки funding одновременно обновлять
 `ArbitrageWikiPage`, чтобы пользовательская справка не расходилась с backend.
@@ -440,6 +492,9 @@ go test ./...
 - first_seen continuity;
 - history interval, migration, round-trip и retention;
 - API auth, empty DB, limit и stats.
+- chart catalog intersection, REST history и WebSocket auth;
+- parsing kline WebSocket payload Binance/Bybit/OKX;
+- shared subscription, update текущей свечи и reconnect status.
 
 Live-smoke на машине владельца выполнять через:
 

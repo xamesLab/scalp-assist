@@ -63,8 +63,11 @@ func (cfg *Config) applyDefaults() {
 	if cfg.Cycles.ArbitrageInterval <= 0 {
 		cfg.Cycles.ArbitrageInterval = 10 * time.Second
 	}
+	arbitrageDefaults := DefaultArbitrageSettings()
 	if cfg.Arbitrage.TopN == 0 {
-		cfg.Arbitrage = DefaultArbitrageSettings()
+		cfg.Arbitrage = arbitrageDefaults
+	} else if len(cfg.Arbitrage.MakerFeesBps) == 0 {
+		cfg.Arbitrage.MakerFeesBps = arbitrageDefaults.MakerFeesBps
 	}
 }
 
@@ -84,6 +87,11 @@ func DefaultArbitrageSettings() arbitragemodel.Settings {
 			string(domain.ExchangeBinance): 5,
 			string(domain.ExchangeBybit):   5.5,
 			string(domain.ExchangeOKX):     5,
+		},
+		MakerFeesBps: map[string]float64{
+			string(domain.ExchangeBinance): 2,
+			string(domain.ExchangeBybit):   2,
+			string(domain.ExchangeOKX):     2,
 		},
 	}
 }
@@ -143,6 +151,16 @@ func ValidateArbitrageSettings(settings arbitragemodel.Settings) error {
 		}
 		if fee < 0 {
 			return fmt.Errorf("arbitrage.fees_bps.%s must be non-negative", exchange)
+		}
+	}
+	for exchange, fee := range settings.MakerFeesBps {
+		if exchange != string(domain.ExchangeBinance) &&
+			exchange != string(domain.ExchangeBybit) &&
+			exchange != string(domain.ExchangeOKX) {
+			return fmt.Errorf("arbitrage.maker_fees_bps contains unknown exchange %q", exchange)
+		}
+		if fee < 0 {
+			return fmt.Errorf("arbitrage.maker_fees_bps.%s must be non-negative", exchange)
 		}
 	}
 	return nil

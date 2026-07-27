@@ -2,11 +2,16 @@ package okx
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange"
@@ -14,9 +19,11 @@ import (
 )
 
 const DefaultBaseURL = "https://www.okx.com"
+const DefaultWSURL = "wss://ws.okx.com:8443/ws/v5/business"
 
 type Client struct {
 	http           *exchange.Client
+	wsURL          string
 	contractsCache marketdata.Cache[[]domain.ContractSpec]
 	tickersCache   marketdata.Cache[tickersResponse]
 	fundingCache   marketdata.KeyedCache[string, domain.FundingInfo]
@@ -27,7 +34,7 @@ func New() *Client {
 }
 
 func NewWithBaseURL(baseURL string) *Client {
-	return &Client{http: exchange.NewClient(baseURL)}
+	return &Client{http: exchange.NewClient(baseURL), wsURL: DefaultWSURL}
 }
 
 func (c *Client) Exchange() domain.Exchange {
@@ -186,6 +193,135 @@ func (c *Client) SymbolFunding(ctx context.Context, symbol string) (domain.Fundi
 	})
 }
 
+func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int) ([]domain.Kline, map[string]string, error) {
+	query := url.Values{}
+	query.Set("instId", symbol)
+	query.Set("bar", interval)
+	if limit > 0 {
+		if limit > 300 {
+			limit = 300
+		}
+		query.Set("limit", strconv.Itoa(limit))
+	}
+
+	var resp candlesResponse
+	meta, err := c.http.GetJSON(ctx, "/api/v5/market/candles", query, &resp)
+	if err != nil {
+		return nil, nil, wrapErr(err)
+	}
+	if err := checkCode(resp.Code, resp.Msg); err != nil {
+		return nil, nil, err
+	}
+
+	klines := make([]domain.Kline, 0, len(resp.Data))
+	for _, row := range resp.Data {
+		if len(row) < 5 {
+			return nil, nil, fmt.Errorf("short kline row for %s", symbol)
+		}
+		openMS, err := strconv.ParseInt(row[0], 10, 64)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse open time for %s: %w", symbol, err)
+		}
+		closePrice, err := parseFloat(row[4])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse close for %s: %w", symbol, err)
+		}
+		closed := len(row) < 9 || row[8] == "1"
+		klines = append(klines, domain.Kline{
+			OpenTime: time.UnixMilli(openMS),
+			Close:    closePrice,
+			Closed:   closed,
+		})
+	}
+	sort.Slice(klines, func(i, j int) bool {
+		return klines[i].OpenTime.Before(klines[j].OpenTime)
+	})
+	return klines, exchange.HeaderSubset(meta.Headers), nil
+}
+
+func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out chan<- domain.Kline) error {
+	channel := ""
+	switch interval {
+	case "1m":
+		channel = "candle1m"
+	case "5m":
+		channel = "candle5m"
+	default:
+		return fmt.Errorf("unsupported OKX kline interval %q", interval)
+	}
+
+	conn, _, err := websocket.Dial(ctx, c.wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("connect OKX websocket: %w", err)
+	}
+	defer conn.CloseNow()
+
+	if err := wsjson.Write(ctx, conn, map[string]any{
+		"op": "subscribe",
+		"args": []map[string]string{{
+			"channel": channel,
+			"instId":  symbol,
+		}},
+	}); err != nil {
+		return fmt.Errorf("subscribe OKX %s/%s: %w", channel, symbol, err)
+	}
+
+	pingCtx, stopPing := context.WithCancel(ctx)
+	defer stopPing()
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingCtx.Done():
+				return
+			case <-ticker.C:
+				_ = conn.Write(pingCtx, websocket.MessageText, []byte("ping"))
+			}
+		}
+	}()
+
+	for {
+		messageType, payload, err := conn.Read(ctx)
+		if err != nil {
+			return err
+		}
+		if messageType != websocket.MessageText || string(payload) == "pong" {
+			continue
+		}
+		var event okxKlineEvent
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return fmt.Errorf("decode OKX websocket kline: %w", err)
+		}
+		if event.Arg.Channel != channel || event.Arg.InstID != symbol {
+			continue
+		}
+		for _, row := range event.Data {
+			if len(row) < 5 {
+				return fmt.Errorf("short OKX websocket kline row for %s", symbol)
+			}
+			openMS, err := strconv.ParseInt(row[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse OKX websocket open time for %s: %w", symbol, err)
+			}
+			closePrice, err := parseFloat(row[4])
+			if err != nil {
+				return fmt.Errorf("parse OKX websocket close for %s: %w", symbol, err)
+			}
+			point := domain.Kline{
+				OpenTime: time.UnixMilli(openMS),
+				Close:    closePrice,
+				Closed:   len(row) >= 9 && row[8] == "1",
+			}
+			select {
+			case out <- point:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+}
+
 func checkCode(code, message string) error {
 	if code == "0" {
 		return nil
@@ -269,4 +405,18 @@ type fundingResponse struct {
 		PrevFundingTime string `json:"prevFundingTime"`
 		Timestamp       string `json:"ts"`
 	} `json:"data"`
+}
+
+type candlesResponse struct {
+	Code string     `json:"code"`
+	Msg  string     `json:"msg"`
+	Data [][]string `json:"data"`
+}
+
+type okxKlineEvent struct {
+	Arg struct {
+		Channel string `json:"channel"`
+		InstID  string `json:"instId"`
+	} `json:"arg"`
+	Data [][]string `json:"data"`
 }

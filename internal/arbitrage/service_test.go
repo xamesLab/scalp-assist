@@ -92,3 +92,16 @@ func serviceSettings() model.Settings {
 	settings.RetentionDays = 30
 	return settings
 }
+
+func TestFeeRatesExposeConfiguredMakerAndTakerFees(t *testing.T) {
+	settings := serviceSettings()
+	service, err := New(Options{Settings: settings})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rates := service.FeeRates()
+	if len(rates) != 3 || rates[0].Exchange != "binance" ||
+		rates[0].MakerBps != 2 || rates[0].TakerBps != 5 {
+		t.Fatalf("unexpected fee rates: %+v", rates)
+	}
+}

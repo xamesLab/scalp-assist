@@ -193,7 +193,7 @@ Funding не включён в `net_bps`, потому что фактическ
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| GET | `/api/dashboard/summary` | Сводка обоих контуров |
+| GET | `/api/dashboard/summary` | Сводка обоих контуров и до пяти top-строк каждого |
 | GET | `/api/health` | Состояние сервиса |
 | POST | `/api/auth/login` | Вход |
 | POST | `/api/auth/logout` | Выход |

@@ -13,10 +13,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
 	"scalp-assist/internal/arbitrage"
 	arbitragemodel "scalp-assist/internal/arbitrage/model"
@@ -45,6 +49,20 @@ type Options struct {
 	SecureCookies bool
 	Refresh       func(context.Context) error
 	Arbitrage     *arbitrage.Service
+}
+
+type dashboardArbitrageRow struct {
+	Instrument   domain.InstrumentKey `json:"instrument"`
+	BuyExchange  domain.Exchange      `json:"buy_exchange"`
+	SellExchange domain.Exchange      `json:"sell_exchange"`
+	NetSpreadBps float64              `json:"net_spread_bps"`
+	FirstSeenAt  time.Time            `json:"first_seen_at"`
+	ObservedAt   time.Time            `json:"observed_at"`
+}
+
+type dashboardScreenerRow struct {
+	Instrument domain.Instrument `json:"instrument"`
+	Score      float64           `json:"score"`
 }
 
 func New(opts Options) *Server {
@@ -77,6 +95,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/arbitrage/opportunities", s.withAuth(s.arbitrageOpportunities))
 	mux.HandleFunc("/api/arbitrage/stats", s.withAuth(s.arbitrageStats))
 	mux.HandleFunc("/api/arbitrage/refresh", s.withAuth(s.arbitrageRefresh))
+	mux.HandleFunc("/api/arbitrage/fees", s.withAuth(s.arbitrageFees))
+	mux.HandleFunc("/api/arbitrage/charts/instruments", s.withAuth(s.arbitrageChartInstruments))
+	mux.HandleFunc("/api/arbitrage/charts/stream", s.withAuth(s.arbitrageChartStream))
 	mux.HandleFunc("/api/screener/top", s.withAuth(s.top))
 	mux.HandleFunc("/api/screener/history", s.withAuth(s.history))
 	mux.HandleFunc("/api/screener/snapshots", s.withAuth(s.snapshots))
@@ -97,20 +118,74 @@ func (s *Server) dashboardSummary(w http.ResponseWriter, r *http.Request, _ stor
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	screenerRows, err := s.store.LatestSnapshotRows(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
 	arbitrageRun, err := s.latestArbitrageRun(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
+	topScore := dashboardTopScreener(screenerRows, 5)
+	positiveRows, positiveTotal := dashboardPositiveArbitrage(arbitrageRun.Opportunities, 5)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"screener": screener,
+		"screener": map[string]any{
+			"updated_at": screener.CreatedAt,
+			"rows":       screener.Rows,
+			"top_score":  topScore,
+		},
 		"arbitrage": map[string]any{
-			"updated_at":    arbitrageRun.ObservedAt,
-			"instruments":   arbitrageRun.Instruments,
-			"opportunities": len(arbitrageRun.Opportunities),
-			"exchanges":     arbitrageRun.ExchangeState,
+			"updated_at":             arbitrageRun.ObservedAt,
+			"instruments":            arbitrageRun.Instruments,
+			"opportunities":          len(arbitrageRun.Opportunities),
+			"exchanges":              arbitrageRun.ExchangeState,
+			"positive_opportunities": positiveRows,
+			"positive_total":         positiveTotal,
 		},
 	})
+}
+
+func dashboardTopScreener(items []domain.MetricsRow, limit int) []dashboardScreenerRow {
+	sorted := append([]domain.MetricsRow(nil), items...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].Score == sorted[j].Score {
+			return sorted[i].Rank < sorted[j].Rank
+		}
+		return sorted[i].Score > sorted[j].Score
+	})
+	if limit >= 0 && len(sorted) > limit {
+		sorted = sorted[:limit]
+	}
+	rows := make([]dashboardScreenerRow, 0, len(sorted))
+	for _, item := range sorted {
+		rows = append(rows, dashboardScreenerRow{Instrument: item.Instrument, Score: item.Score})
+	}
+	return rows
+}
+
+func dashboardPositiveArbitrage(items []arbitragemodel.Opportunity, limit int) ([]dashboardArbitrageRow, int) {
+	rows := make([]dashboardArbitrageRow, 0, limit)
+	total := 0
+	for _, item := range items {
+		if item.NetSpreadBps <= 0 {
+			continue
+		}
+		total++
+		if len(rows) >= limit {
+			continue
+		}
+		rows = append(rows, dashboardArbitrageRow{
+			Instrument:   item.Instrument,
+			BuyExchange:  item.BuyExchange,
+			SellExchange: item.SellExchange,
+			NetSpreadBps: item.NetSpreadBps,
+			FirstSeenAt:  item.FirstSeenAt,
+			ObservedAt:   item.ObservedAt,
+		})
+	}
+	return rows, total
 }
 
 func (s *Server) arbitrageOpportunities(w http.ResponseWriter, r *http.Request, _ store.User) {
@@ -157,6 +232,111 @@ func (s *Server) arbitrageRefresh(w http.ResponseWriter, r *http.Request, _ stor
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) arbitrageFees(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.arbitrage == nil {
+		writeError(w, http.StatusServiceUnavailable, "arbitrage_unavailable", "arbitrage service is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"source": "configuration",
+		"rates":  s.arbitrage.FeeRates(),
+	})
+}
+
+func (s *Server) arbitrageChartInstruments(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.arbitrage == nil {
+		writeJSON(w, http.StatusOK, []arbitragemodel.ChartInstrument{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.arbitrage.ChartInstruments())
+}
+
+func (s *Server) arbitrageChartStream(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.arbitrage == nil {
+		writeError(w, http.StatusServiceUnavailable, "arbitrage_unavailable", "arbitrage service is unavailable")
+		return
+	}
+	instrumentID := strings.TrimSpace(r.URL.Query().Get("instrument"))
+	interval := strings.TrimSpace(r.URL.Query().Get("interval"))
+	events, unsubscribe, err := s.arbitrage.SubscribeChart(instrumentID, interval)
+	if err != nil {
+		status := http.StatusBadRequest
+		code := "invalid_chart_request"
+		if errors.Is(err, arbitrage.ErrChartInstrumentNotFound) {
+			status = http.StatusNotFound
+			code = "instrument_not_found"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	defer unsubscribe()
+
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	conn.SetReadLimit(1024)
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() {
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	snapshot, err := s.arbitrage.ChartSnapshot(ctx, instrumentID, interval, 300)
+	if err != nil {
+		_ = writeChartMessage(ctx, conn, arbitragemodel.ChartEvent{Type: "error", Error: err.Error()})
+		return
+	}
+	if err := writeChartMessage(ctx, conn, snapshot); err != nil {
+		return
+	}
+
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-events:
+			if err := writeChartMessage(ctx, conn, event); err != nil {
+				return
+			}
+		case <-ping.C:
+			pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+			err := conn.Ping(pingCtx)
+			pingCancel()
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
+func writeChartMessage(ctx context.Context, conn *websocket.Conn, value any) error {
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return wsjson.Write(writeCtx, conn, value)
 }
 
 func (s *Server) latestArbitrageRun(ctx context.Context) (arbitragemodel.Run, error) {

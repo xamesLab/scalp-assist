@@ -92,6 +92,7 @@ type FundingInfo struct {
 type Kline struct {
 	OpenTime time.Time `json:"open_time"`
 	Close    float64   `json:"close"`
+	Closed   bool      `json:"closed,omitempty"`
 }
 
 type MarketSnapshot struct {

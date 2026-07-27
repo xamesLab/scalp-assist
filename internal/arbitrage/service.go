@@ -37,18 +37,21 @@ type Options struct {
 }
 
 type Service struct {
-	store       *store.Store
-	clients     []QuoteClient
-	settings    model.Settings
-	interval    time.Duration
-	resolver    *normalize.Resolver
-	logger      *slog.Logger
-	now         func() time.Time
-	refreshMu   sync.Mutex
-	stateMu     sync.RWMutex
-	latest      model.Run
-	lastPersist time.Time
-	active      map[string]seenState
+	store        *store.Store
+	clients      []QuoteClient
+	settings     model.Settings
+	interval     time.Duration
+	resolver     *normalize.Resolver
+	logger       *slog.Logger
+	now          func() time.Time
+	refreshMu    sync.Mutex
+	stateMu      sync.RWMutex
+	latest       model.Run
+	lastPersist  time.Time
+	active       map[string]seenState
+	chartMu      sync.RWMutex
+	chartCatalog map[string]model.ChartInstrument
+	chartStreams map[string]*sharedChartStream
 }
 
 type seenState struct {
@@ -70,14 +73,16 @@ func New(opts Options) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		store:    opts.Store,
-		clients:  append([]QuoteClient(nil), opts.Clients...),
-		settings: opts.Settings,
-		interval: interval,
-		resolver: resolver,
-		logger:   opts.Logger,
-		now:      now,
-		active:   make(map[string]seenState),
+		store:        opts.Store,
+		clients:      append([]QuoteClient(nil), opts.Clients...),
+		settings:     opts.Settings,
+		interval:     interval,
+		resolver:     resolver,
+		logger:       opts.Logger,
+		now:          now,
+		active:       make(map[string]seenState),
+		chartCatalog: make(map[string]model.ChartInstrument),
+		chartStreams: make(map[string]*sharedChartStream),
 	}, nil
 }
 
@@ -117,6 +122,9 @@ func (s *Service) Refresh(ctx context.Context) error {
 		s.setLatest(run)
 		return fmt.Errorf("arbitrage requires at least two exchanges, available: %d", successes)
 	}
+	if successes == len(s.clients) {
+		s.updateChartCatalog(quotes)
+	}
 
 	result := Scan(quotes, s.settings, s.resolver, now)
 	run.Instruments = result.Instruments
@@ -133,6 +141,7 @@ func (s *Service) Refresh(ctx context.Context) error {
 		run.ID = runID
 		s.lastPersist = now
 		s.setLatest(run)
+		s.broadcastStoredGross(run)
 		cutoff := now.AddDate(0, 0, -s.settings.RetentionDays)
 		if err := s.store.DeleteArbitrageBefore(ctx, cutoff); err != nil {
 			s.logWarn("arbitrage retention cleanup failed", "error", err)
@@ -145,6 +154,23 @@ func (s *Service) Latest() model.Run {
 	s.stateMu.RLock()
 	defer s.stateMu.RUnlock()
 	return cloneRun(s.latest)
+}
+
+func (s *Service) FeeRates() []model.ExchangeFeeRate {
+	rates := make([]model.ExchangeFeeRate, 0, 3)
+	for _, exchange := range []domain.Exchange{
+		domain.ExchangeBinance,
+		domain.ExchangeBybit,
+		domain.ExchangeOKX,
+	} {
+		key := string(exchange)
+		rates = append(rates, model.ExchangeFeeRate{
+			Exchange: key,
+			MakerBps: s.settings.MakerFeesBps[key],
+			TakerBps: s.settings.FeesBps[key],
+		})
+	}
+	return rates
 }
 
 func (s *Service) fetchQuotes(ctx context.Context, now time.Time) ([]domain.VenueQuote, map[string]model.ExchangeState, int) {

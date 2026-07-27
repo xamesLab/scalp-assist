@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,21 +29,22 @@ func TestArbitrageRunRoundTripAndStats(t *testing.T) {
 		},
 		Instruments: 1,
 		Opportunities: []model.Opportunity{{
-			Instrument:     domain.InstrumentKey{Base: "BTC", Quote: "USDT", Multiplier: 1, Kind: "linear_perpetual"},
-			BuyExchange:    domain.ExchangeBinance,
-			SellExchange:   domain.ExchangeBybit,
-			BuySymbol:      "BTCUSDT",
-			SellSymbol:     "BTCUSDT",
-			BuyAsk:         100,
-			SellBid:        101,
-			GrossSpreadBps: 100,
-			NetSpreadBps:   90,
-			CapacityUSD:    1000,
-			BuyFundingRate: &funding,
-			BuyQuoteAt:     now,
-			SellQuoteAt:    now,
-			FirstSeenAt:    now,
-			ObservedAt:     now,
+			Instrument:       domain.InstrumentKey{Base: "BTC", Quote: "USDT", Multiplier: 1, Kind: "linear_perpetual"},
+			BuyExchange:      domain.ExchangeBinance,
+			SellExchange:     domain.ExchangeBybit,
+			BuySymbol:        "BTCUSDT",
+			SellSymbol:       "BTCUSDT",
+			BuyAsk:           100,
+			SellBid:          101,
+			GrossSpreadBps:   100,
+			NetSpreadBps:     90,
+			NetMakerTakerBps: 93,
+			CapacityUSD:      1000,
+			BuyFundingRate:   &funding,
+			BuyQuoteAt:       now,
+			SellQuoteAt:      now,
+			FirstSeenAt:      now,
+			ObservedAt:       now,
 		}},
 	}
 	id, err := db.SaveArbitrageRun(ctx, run)
@@ -56,7 +58,8 @@ func TestArbitrageRunRoundTripAndStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LatestArbitrageRun: %v", err)
 	}
-	if len(got.Opportunities) != 1 || got.Opportunities[0].NetSpreadBps != 90 {
+	if len(got.Opportunities) != 1 || got.Opportunities[0].NetSpreadBps != 90 ||
+		got.Opportunities[0].NetMakerTakerBps != 93 {
 		t.Fatalf("unexpected run: %+v", got)
 	}
 	stats, err := db.ArbitrageStats(ctx, 7)
@@ -65,5 +68,12 @@ func TestArbitrageRunRoundTripAndStats(t *testing.T) {
 	}
 	if stats.Runs != 1 || stats.Observations != 1 || stats.ProfitableCount != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	gross, err := db.ArbitrageGrossHistory(ctx, run.Opportunities[0].Instrument, now.Add(-time.Minute), time.Minute, 100)
+	if err != nil {
+		t.Fatalf("ArbitrageGrossHistory: %v", err)
+	}
+	if len(gross) != 1 || math.Abs(gross[0].Value-100) > 0.000001 {
+		t.Fatalf("unexpected gross history: %+v", gross)
 	}
 }

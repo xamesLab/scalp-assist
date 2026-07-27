@@ -39,6 +39,10 @@ arbitrage:
     binance: 5
     bybit: 5.5
     okx: 5
+  maker_fees_bps:
+    binance: 2
+    bybit: 2
+    okx: 2
 
 blacklist:
   - USDC

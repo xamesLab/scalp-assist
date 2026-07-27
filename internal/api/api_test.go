@@ -4,12 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
+	"scalp-assist/internal/arbitrage"
 	arbitragemodel "scalp-assist/internal/arbitrage/model"
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/store"
@@ -187,6 +194,175 @@ func TestDashboardAndArbitrageEndpoints(t *testing.T) {
 			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
 		}
 	}
+}
+
+func TestDashboardPositiveArbitrageLimitsRowsAndCountsRemainder(t *testing.T) {
+	now := time.Date(2026, 7, 27, 12, 0, 0, 0, time.UTC)
+	items := make([]arbitragemodel.Opportunity, 0, 8)
+	for index := range 7 {
+		items = append(items, arbitragemodel.Opportunity{
+			Instrument:   domain.InstrumentKey{Base: fmt.Sprintf("ASSET%d", index), Quote: "USDT", Multiplier: 1, Kind: "linear_perpetual"},
+			BuyExchange:  domain.ExchangeBinance,
+			SellExchange: domain.ExchangeBybit,
+			NetSpreadBps: float64(70 - index),
+			FirstSeenAt:  now.Add(-time.Duration(index+1) * time.Minute),
+			ObservedAt:   now,
+		})
+	}
+	items = append(items, arbitragemodel.Opportunity{NetSpreadBps: 0})
+
+	rows, total := dashboardPositiveArbitrage(items, 5)
+	if len(rows) != 5 || total != 7 {
+		t.Fatalf("rows=%d total=%d, want rows=5 total=7", len(rows), total)
+	}
+	if rows[0].Instrument.Base != "ASSET0" || rows[4].NetSpreadBps != 66 {
+		t.Fatalf("unexpected rows: %+v", rows)
+	}
+}
+
+func TestDashboardTopScreenerSortsByScore(t *testing.T) {
+	rows := dashboardTopScreener([]domain.MetricsRow{
+		{Instrument: domain.Instrument{Base: "LOW", Multiplier: 1}, Rank: 1, Score: 0.2},
+		{Instrument: domain.Instrument{Base: "HIGH", Multiplier: 1}, Rank: 3, Score: 0.9},
+		{Instrument: domain.Instrument{Base: "MID", Multiplier: 1}, Rank: 2, Score: 0.5},
+	}, 2)
+	if len(rows) != 2 || rows[0].Instrument.Base != "HIGH" || rows[1].Instrument.Base != "MID" {
+		t.Fatalf("unexpected top score rows: %+v", rows)
+	}
+}
+
+func TestArbitrageChartWebSocketRequiresAuthAndStreamsSnapshot(t *testing.T) {
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "charts.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.BootstrapUser(context.Background(), "owner@example.com", "secret"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Minute)
+	clients := []arbitrage.QuoteClient{
+		apiChartClient{exchange: domain.ExchangeBinance, symbol: "BTCUSDT", price: 100, now: now},
+		apiChartClient{exchange: domain.ExchangeBybit, symbol: "BTCUSDT", price: 101, now: now},
+		apiChartClient{exchange: domain.ExchangeOKX, symbol: "BTC-USDT-SWAP", price: 102, now: now},
+	}
+	chartService, err := arbitrage.New(arbitrage.Options{
+		Store:   db,
+		Clients: clients,
+		Settings: arbitragemodel.Settings{
+			MinGrossSpreadBps: 0, MaxGrossSpreadBps: 1000, MinNetSpreadBps: -100,
+			MaxQuoteAge: time.Minute, MaxQuoteSkew: time.Minute, TopN: 30,
+			HistoryInterval: time.Minute, RetentionDays: 30,
+			FeesBps:      map[string]float64{"binance": 5, "bybit": 5, "okx": 5},
+			MakerFeesBps: map[string]float64{"binance": 2, "bybit": 2, "okx": 2},
+		},
+		Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("arbitrage.New: %v", err)
+	}
+	if err := chartService.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	srv := New(Options{
+		Store: db, Defaults: testSettings(),
+		JWTSecret: []byte("01234567890123456789012345678901"),
+		Arbitrage: chartService,
+	})
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+
+	unauthorizedURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/arbitrage/charts/stream?instrument=BTC%3AUSDT%3A1%3Alinear_perpetual&interval=1m"
+	if conn, resp, err := websocket.Dial(context.Background(), unauthorizedURL, nil); err == nil {
+		conn.CloseNow()
+		t.Fatal("unauthorized websocket dial succeeded")
+	} else if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthorized websocket response = %+v err=%v", resp, err)
+	}
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	loginBody := bytes.NewBufferString(`{"email":"owner@example.com","password":"secret"}`)
+	resp, err := client.Post(httpServer.URL+"/api/auth/login", "application/json", loginBody)
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d", resp.StatusCode)
+	}
+
+	feesResponse, err := client.Get(httpServer.URL + "/api/arbitrage/fees")
+	if err != nil {
+		t.Fatalf("fees request: %v", err)
+	}
+	var fees struct {
+		Source string                           `json:"source"`
+		Rates  []arbitragemodel.ExchangeFeeRate `json:"rates"`
+	}
+	if err := json.NewDecoder(feesResponse.Body).Decode(&fees); err != nil {
+		_ = feesResponse.Body.Close()
+		t.Fatalf("decode fees: %v", err)
+	}
+	_ = feesResponse.Body.Close()
+	if feesResponse.StatusCode != http.StatusOK || fees.Source != "configuration" ||
+		len(fees.Rates) != 3 || fees.Rates[0].MakerBps != 2 {
+		t.Fatalf("unexpected fees response: status=%d body=%+v", feesResponse.StatusCode, fees)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn, _, err := websocket.Dial(ctx, unauthorizedURL, &websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	var snapshot arbitragemodel.ChartSnapshot
+	if err := wsjson.Read(ctx, conn, &snapshot); err != nil {
+		t.Fatalf("read snapshot: %v", err)
+	}
+	if snapshot.Type != "snapshot" || len(snapshot.Series["binance"]) != 1 || len(snapshot.StoredGross) != 1 {
+		t.Fatalf("unexpected snapshot: %+v", snapshot)
+	}
+}
+
+type apiChartClient struct {
+	exchange domain.Exchange
+	symbol   string
+	price    float64
+	now      time.Time
+}
+
+func (f apiChartClient) Exchange() domain.Exchange {
+	return f.exchange
+}
+
+func (f apiChartClient) Quotes(context.Context) ([]domain.VenueQuote, error) {
+	return []domain.VenueQuote{{
+		Exchange: f.exchange, SourceSymbol: f.symbol,
+		Contract: domain.ContractSpec{
+			Exchange: f.exchange, Symbol: f.symbol, BaseAsset: "BTC", QuoteAsset: "USDT",
+			Status: "TRADING", ContractType: "PERPETUAL",
+		},
+		BidPrice: f.price - 1, AskPrice: f.price, BidQuantity: 10, AskQuantity: 10,
+		QuantityMultiplier: 1, UpdatedAt: f.now,
+	}}, nil
+}
+
+func (f apiChartClient) Klines(context.Context, string, string, int) ([]domain.Kline, map[string]string, error) {
+	return []domain.Kline{{OpenTime: f.now, Close: f.price}}, nil, nil
+}
+
+func (f apiChartClient) StreamKlines(ctx context.Context, _ string, _ string, out chan<- domain.Kline) error {
+	select {
+	case out <- domain.Kline{OpenTime: f.now, Close: f.price + 0.5}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	<-ctx.Done()
+	return ctx.Err()
 }
 
 type testServer struct {

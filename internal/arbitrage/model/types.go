@@ -18,6 +18,7 @@ type Settings struct {
 	HistoryInterval   time.Duration      `json:"history_interval" yaml:"history_interval"`
 	RetentionDays     int                `json:"retention_days" yaml:"retention_days"`
 	FeesBps           map[string]float64 `json:"fees_bps" yaml:"fees_bps"`
+	MakerFeesBps      map[string]float64 `json:"maker_fees_bps" yaml:"maker_fees_bps"`
 }
 
 type Opportunity struct {
@@ -30,6 +31,7 @@ type Opportunity struct {
 	SellBid                  float64              `json:"sell_bid"`
 	GrossSpreadBps           float64              `json:"gross_spread_bps"`
 	NetSpreadBps             float64              `json:"net_spread_bps"`
+	NetMakerTakerBps         float64              `json:"net_maker_taker_bps"`
 	CapacityUSD              float64              `json:"capacity_usd"`
 	BuyFundingRate           *float64             `json:"buy_funding_rate,omitempty"`
 	SellFundingRate          *float64             `json:"sell_funding_rate,omitempty"`
@@ -74,4 +76,39 @@ type Stats struct {
 	MaxNetBps       float64     `json:"max_net_bps"`
 	ProfitableCount int         `json:"profitable_count"`
 	Routes          []RouteStat `json:"routes"`
+}
+
+type ExchangeFeeRate struct {
+	Exchange string  `json:"exchange"`
+	MakerBps float64 `json:"maker_bps"`
+	TakerBps float64 `json:"taker_bps"`
+}
+
+type ChartInstrument struct {
+	ID         string                     `json:"id"`
+	Instrument domain.InstrumentKey       `json:"instrument"`
+	Symbols    map[domain.Exchange]string `json:"symbols"`
+}
+
+type ChartPoint struct {
+	Time   int64   `json:"time"`
+	Value  float64 `json:"value"`
+	Closed bool    `json:"closed"`
+}
+
+type ChartSnapshot struct {
+	Type        string                  `json:"type"`
+	Instrument  ChartInstrument         `json:"instrument"`
+	Interval    string                  `json:"interval"`
+	Series      map[string][]ChartPoint `json:"series"`
+	StoredGross []ChartPoint            `json:"stored_gross"`
+	Errors      map[string]string       `json:"errors,omitempty"`
+}
+
+type ChartEvent struct {
+	Type     string      `json:"type"`
+	Exchange string      `json:"exchange,omitempty"`
+	Status   string      `json:"status,omitempty"`
+	Error    string      `json:"error,omitempty"`
+	Point    *ChartPoint `json:"point,omitempty"`
 }
