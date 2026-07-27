@@ -1,15 +1,19 @@
 import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
+  ArrowLeftRight,
+  ArrowRight,
   BarChart3,
-  History,
+  Home,
   LogIn,
   LogOut,
   Moon,
+  PanelTopClose,
+  PanelTopOpen,
   RefreshCw,
   Search,
-  Settings,
   Sun,
+  Upload,
   UserPlus,
 } from 'lucide-react'
 import './styles.css'
@@ -48,6 +52,10 @@ const api = {
   savePropList: (props) => api.request('/api/prop-list', { method: 'PUT', body: JSON.stringify(props) }),
   settings: () => api.request('/api/settings'),
   saveSettings: (overrides) => api.request('/api/settings', { method: 'PUT', body: JSON.stringify({ overrides }) }),
+  dashboard: () => api.request('/api/dashboard/summary'),
+  arbitrage: (limit = 30) => api.request(`/api/arbitrage/opportunities?limit=${limit}`),
+  arbitrageStats: (days = 7) => api.request(`/api/arbitrage/stats?days=${days}`),
+  refreshArbitrage: () => api.request('/api/arbitrage/refresh', { method: 'POST' }),
 }
 
 function App() {
@@ -107,11 +115,11 @@ function Landing({ user, nav, theme, setTheme }) {
       <div className="landing-bg" />
       <div className="landing-overlay" />
       <header className="landing-nav">
-        <div className="brand light">Screener</div>
+        <div className="brand light">Scalp Assist</div>
         <div className="fx ac gap8">
           <ThemeButton theme={theme} setTheme={setTheme} light />
           {user ? (
-            <button className="btn light" onClick={() => nav('/app/top')}>Open app</button>
+            <button className="btn light" onClick={() => nav('/app')}>Open app</button>
           ) : (
             <>
               <button className="btn light" onClick={() => nav('/auth')}><LogIn size={16} />Sign in</button>
@@ -121,11 +129,11 @@ function Landing({ user, nav, theme, setTheme }) {
         </div>
       </header>
       <section className="landing-copy">
-        <div className="landing-kicker">Binance / Bybit / Futures</div>
-        <h1>Screener</h1>
-        <p>Private futures scalp assistant: ranks live Binance and Bybit instruments by movement, turnover, BTC correlation, inplay state, and prop-list coverage.</p>
+        <div className="landing-kicker">Binance / Bybit / OKX</div>
+        <h1>Scalp Assist</h1>
+        <p>Private futures workspace with market screening and cross-exchange spread monitoring in one service.</p>
         <div className="landing-actions">
-          <button className="btn btn-primary big" onClick={() => nav(user ? '/app/top' : '/auth')}>View top</button>
+          <button className="btn btn-primary big" onClick={() => nav(user ? '/app' : '/auth')}>Open workspace</button>
           <button className="btn light big" onClick={() => nav('/auth')}>Sign in or register</button>
         </div>
       </section>
@@ -141,7 +149,7 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (user) nav('/app/top')
+    if (user) nav('/app')
   }, [user])
 
   const submit = async (event) => {
@@ -152,7 +160,7 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
     try {
       const me = await api.login(email, password)
       setUser(me)
-      nav('/app/top')
+      nav('/app')
     } catch (err) {
       setError(err.message)
     } finally {
@@ -163,7 +171,7 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
   return (
     <div className="app auth-shell">
       <header className="auth-top">
-        <button className="brand as-button" onClick={() => nav('/')}>Screener</button>
+        <button className="brand as-button" onClick={() => nav('/')}>Scalp Assist</button>
         <ThemeButton theme={theme} setTheme={setTheme} />
       </header>
       <form className="auth-panel" onSubmit={submit}>
@@ -189,7 +197,9 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
 }
 
 function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme }) {
-  const current = path.includes('/history') ? 'history' : path.includes('/settings') ? 'settings' : 'top'
+  const contour = path === '/app' ? 'dashboard' : path.startsWith('/app/arbitrage') ? 'arbitrage' : 'screener'
+  const screenerView = path.endsWith('/history') ? 'history' : path.endsWith('/settings') ? 'settings' : path.endsWith('/wiki') ? 'wiki' : 'top'
+  const arbitrageView = path.endsWith('/settings') ? 'settings' : path.endsWith('/wiki') ? 'wiki' : 'list'
   const logout = async () => {
     try { await api.logout() } catch {}
     setUser(null)
@@ -199,11 +209,11 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
     <div className="app">
       <div className="topbar">
         <div className="fx ac gap24">
-          <div className="brand">Screener</div>
-          <div className="fx gap4">
-            <button className={`tab ${current === 'top' ? 'on' : ''}`} onClick={() => nav('/app/top')}><BarChart3 size={15} />Top</button>
-            <button className={`tab ${current === 'history' ? 'on' : ''}`} onClick={() => nav('/app/history')}><History size={15} />History</button>
-            <button className={`tab ${current === 'settings' ? 'on' : ''}`} onClick={() => nav('/app/settings')}><Settings size={15} />Settings</button>
+          <button className="brand as-button" onClick={() => nav('/app')}>Scalp Assist</button>
+          <div className="fx gap4 mainnav">
+            <button className={`tab ${contour === 'dashboard' ? 'on' : ''}`} onClick={() => nav('/app')}><Home size={15} />Overview</button>
+            <button className={`tab ${contour === 'screener' ? 'on' : ''}`} onClick={() => nav('/app/screener')}><BarChart3 size={15} />Screener</button>
+            <button className={`tab ${contour === 'arbitrage' ? 'on' : ''}`} onClick={() => nav('/app/arbitrage')}><ArrowLeftRight size={15} />Arbitrage</button>
           </div>
         </div>
         <div className="fx ac gap12">
@@ -212,9 +222,371 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
           <button className="themebtn" onClick={logout} title="Logout"><LogOut size={16} /></button>
         </div>
       </div>
-      {current === 'top' && <TopPage onUnauthorized={onUnauthorized} />}
-      {current === 'history' && <HistoryPage onUnauthorized={onUnauthorized} />}
-      {current === 'settings' && <SettingsPage onUnauthorized={onUnauthorized} />}
+      {contour === 'dashboard' && <DashboardPage nav={nav} onUnauthorized={onUnauthorized} />}
+      {contour === 'screener' && <>
+        <ScreenerNav current={screenerView} nav={nav} />
+        {screenerView === 'top' && <TopPage onUnauthorized={onUnauthorized} />}
+        {screenerView === 'history' && <HistoryPage onUnauthorized={onUnauthorized} />}
+        {screenerView === 'settings' && <SettingsPage onUnauthorized={onUnauthorized} />}
+        {screenerView === 'wiki' && <ScreenerWikiPage />}
+      </>}
+      {contour === 'arbitrage' && <>
+        <ArbitrageNav current={arbitrageView} nav={nav} />
+        {arbitrageView === 'list' && <ArbitragePage onUnauthorized={onUnauthorized} />}
+        {arbitrageView === 'settings' && <div className="page empty-tab-page" role="tabpanel" aria-label="Arbitrage settings" />}
+        {arbitrageView === 'wiki' && <ArbitrageWikiPage />}
+      </>}
+    </div>
+  )
+}
+
+function ScreenerNav({ current, nav }) {
+  return <ContourTabs
+    label="Screener sections"
+    current={current}
+    nav={nav}
+    tabs={[
+    { id: 'top', label: 'Top', path: '/app/screener' },
+    { id: 'history', label: 'History', path: '/app/screener/history' },
+    { id: 'settings', label: 'Settings', path: '/app/screener/settings' },
+    { id: 'wiki', label: 'Wiki', path: '/app/screener/wiki' },
+    ]}
+  />
+}
+
+function ArbitrageNav({ current, nav }) {
+  return <ContourTabs
+    label="Arbitrage sections"
+    current={current}
+    nav={nav}
+    tabs={[
+      { id: 'list', label: 'List', path: '/app/arbitrage' },
+      { id: 'settings', label: 'Settings', path: '/app/arbitrage/settings' },
+      { id: 'wiki', label: 'Wiki', path: '/app/arbitrage/wiki' },
+    ]}
+  />
+}
+
+function ContourTabs({ label, current, nav, tabs }) {
+  return (
+    <nav className="contour-tabs" role="tablist" aria-label={label}>
+      {tabs.map((tab) => (
+        <a
+          key={tab.id}
+          className={`contour-tab ${current === tab.id ? 'on' : ''}`}
+          href={tab.path}
+          role="tab"
+          aria-selected={current === tab.id}
+          onClick={(event) => {
+            event.preventDefault()
+            nav(tab.path)
+          }}
+        >
+          {tab.label}
+        </a>
+      ))}
+    </nav>
+  )
+}
+
+function DashboardPage({ nav, onUnauthorized }) {
+  const [summary, setSummary] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    api.dashboard()
+      .then(setSummary)
+      .catch((err) => err.status === 401 ? onUnauthorized() : setError(err.message))
+  }, [])
+
+  const screener = summary?.screener || {}
+  const arb = summary?.arbitrage || {}
+  const exchanges = Object.entries(arb.exchanges || {})
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Workspace</div><h1>Overview</h1></div>
+        <span className="updated mono">{latestTime(screener.updated_at, arb.updated_at)}</span>
+      </div>
+      {error && <div className="banner">{error}</div>}
+      <div className="contour-grid">
+        <section className="contour-panel">
+          <div className="contour-head"><BarChart3 size={20} /><div><div className="sec-h">Screener</div><div className="dim fs13 mono">{formatUpdated(screener.updated_at)}</div></div></div>
+          <div className="contour-value">{screener.rows ?? 0}</div>
+          <div className="dim">ranked instruments</div>
+          <button className="btn contour-open" onClick={() => nav('/app/screener')}>Open screener <ArrowRight size={16} /></button>
+        </section>
+        <section className="contour-panel">
+          <div className="contour-head"><ArrowLeftRight size={20} /><div><div className="sec-h">Arbitrage</div><div className="dim fs13 mono">{formatUpdated(arb.updated_at)}</div></div></div>
+          <div className="contour-value">{arb.opportunities ?? 0}</div>
+          <div className="dim">{arb.instruments ?? 0} common instruments</div>
+          <div className="exchange-states">{exchanges.map(([name, state]) => <span className={`exchange-state ${state.ok ? 'ok' : 'bad'}`} key={name}><span className="status-dot" />{exchangeLabel(name)}</span>)}</div>
+          <button className="btn contour-open" onClick={() => nav('/app/arbitrage')}>Open arbitrage <ArrowRight size={16} /></button>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+function ArbitragePage({ onUnauthorized }) {
+  const [run, setRun] = useState(null)
+  const [stats, setStats] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+
+  const load = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const [latest, history] = await Promise.all([api.arbitrage(30), api.arbitrageStats(7)])
+      setRun(latest)
+      setStats(history)
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+
+  const refresh = async () => {
+    setLoading(true)
+    try {
+      await api.refreshArbitrage()
+      await load()
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+      setLoading(false)
+    }
+  }
+
+  const rows = (run?.opportunities || []).filter((item) => {
+    const symbol = displayArbitrageSymbol(item.instrument)
+    return !search || symbol.includes(search.toUpperCase())
+  })
+  const positive = (run?.opportunities || []).filter((item) => item.net_spread_bps > 0).length
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Perpetual / USDT</div><h1>Arbitrage</h1></div>
+        <span className="updated mono">{formatUpdated(run?.observed_at)}</span>
+      </div>
+      <div className="fx ac gap12 wrap">
+        <button className="btn btn-primary" onClick={refresh}>{loading && <span className="spinner" />}<RefreshCw size={16} />Refresh now</button>
+        <label className="searchbox"><Search size={15} /><input placeholder="Search ticker" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
+        <div className="exchange-states inline-states">{Object.entries(run?.exchanges || {}).map(([name, state]) => <span className={`exchange-state ${state.ok ? 'ok' : 'bad'}`} title={state.error || `${state.quotes} quotes`} key={name}><span className="status-dot" />{exchangeLabel(name)}</span>)}</div>
+      </div>
+      <div className="cards">
+        <SummaryCard label="Common instruments" value={run?.instruments ?? 0} />
+        <SummaryCard label="Visible spreads" value={run?.opportunities?.length ?? 0} />
+        <SummaryCard label="Net positive" value={positive} tone="pos" />
+        <SummaryCard label="7d max net" value={`${Number(stats?.max_net_bps || 0).toFixed(1)} bps`} />
+      </div>
+      {error && <div className="banner">{error}</div>}
+      <div className="tblwrap">
+        <table className="tbl arb-table">
+          <thead><tr><th>Ticker</th><th>Route</th><th className="ta-r">Buy ask</th><th className="ta-r">Sell bid</th><th className="ta-r">Gross</th><th className="ta-r">Net</th><th className="ta-r">Top capacity</th><th className="ta-r">Funding / h</th><th className="ta-r">Active</th></tr></thead>
+          <tbody>
+            {loading && !run ? Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan="9"><div className="skel" /></td></tr>) : rows.map((item) => (
+              <tr key={`${displayArbitrageSymbol(item.instrument)}-${item.buy_exchange}-${item.sell_exchange}`}>
+                <td className="fw6 mono">{displayArbitrageSymbol(item.instrument)}</td>
+                <td><span className="arb-route"><span className="badge">{exchangeLabel(item.buy_exchange)}</span><ArrowRight size={14} /><span className="badge">{exchangeLabel(item.sell_exchange)}</span></span></td>
+                <td className="mono ta-r">{fmtPrice(item.buy_ask)}</td>
+                <td className="mono ta-r">{fmtPrice(item.sell_bid)}</td>
+                <td className="mono ta-r">{fmtBps(item.gross_spread_bps)}</td>
+                <td className={`mono ta-r fw7 ${item.net_spread_bps > 0 ? 'pos' : 'neg'}`}>{fmtBps(item.net_spread_bps)}</td>
+                <td className="mono ta-r">{fmtMoney(item.capacity_usd)}</td>
+                <td className="mono ta-r">{item.funding_edge_bps_hour == null ? 'n/a' : fmtBps(item.funding_edge_bps_hour)}</td>
+                <td className="mono ta-r">{fmtDuration(item.first_seen_at, item.observed_at)}</td>
+              </tr>
+            ))}
+            {!loading && rows.length === 0 && <tr><td colSpan="9" className="empty-cell">No spreads match the current thresholds.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function ArbitrageWikiPage() {
+  const columns = [
+    ['Ticker', 'Нормализованный фьючерсный инструмент. Множитель является частью тикера: PEPE и 1000PEPE считаются разными контрактами.'],
+    ['Route', 'Направление: первая биржа — купить по Ask, вторая — продать по Bid. Например, Binance → OKX означает long на Binance и short на OKX.'],
+    ['Buy ask', 'Лучшая доступная цена продажи в стакане биржи покупки. По этой цене предполагается открыть long.'],
+    ['Sell bid', 'Лучшая доступная цена покупки в стакане биржи продажи. По этой цене предполагается открыть short.'],
+    ['Gross', 'Разница между Sell bid и Buy ask до комиссий, в базисных пунктах. 1 bps = 0,01%.'],
+    ['Net', 'Gross за вычетом предполагаемых taker-комиссий обеих бирж. Funding, проскальзывание и задержка исполнения сюда не входят.'],
+    ['Top capacity', 'Максимальный долларовый объём, видимый одновременно на первом уровне Ask и Bid. Это не полная глубина стакана.'],
+    ['Funding / h', 'Оценка разницы funding выбранного long/short-направления, приведённая к одному часу. Положительное значение благоприятно для маршрута, n/a означает недостаток данных.'],
+    ['Active', 'Сколько времени это же направление непрерывно остаётся в текущем списке. После длительного исчезновения отсчёт начинается заново.'],
+  ]
+  return (
+    <div className="page wiki-page" role="tabpanel" aria-label="Arbitrage wiki">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Справка</div><h1>Как читать арбитраж</h1></div>
+      </div>
+      <p className="wiki-lead">
+        Страница List сравнивает бессрочные USDT-фьючерсы Binance, Bybit и OKX и показывает направления,
+        где цена покупки на одной бирже ниже цены продажи на другой.
+      </p>
+
+      <section className="wiki-section">
+        <h2>Порядок работы</h2>
+        <ol className="wiki-steps">
+          <li>Проверьте индикаторы бирж: для сравнения должны быть доступны минимум две.</li>
+          <li>Найдите тикер через поиск и проверьте направление в колонке Route.</li>
+          <li>Оцените Net после комиссий и убедитесь, что Top capacity подходит под размер позиции.</li>
+          <li>Проверьте Funding / h и длительность Active, затем перепроверьте цены и стаканы непосредственно на биржах.</li>
+          <li>Кнопка Refresh now запускает внеплановый REST-опрос; обычное обновление выполняется автоматически.</li>
+        </ol>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Сводные показатели</h2>
+        <dl className="wiki-terms">
+          <dt>Common instruments</dt><dd>Количество нормализованных контрактов, найденных минимум на двух доступных биржах.</dd>
+          <dt>Visible spreads</dt><dd>Число направлений, прошедших текущие фильтры spread, свежести и ликвидности.</dd>
+          <dt>Net positive</dt><dd>Количество строк с положительным Net после заложенных комиссий.</dd>
+          <dt>7d max net</dt><dd>Максимальный сохранённый Net за последние семь дней.</dd>
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Столбцы таблицы</h2>
+        <dl className="wiki-terms">
+          {columns.map(([term, description]) => (
+            <React.Fragment key={term}>
+              <dt>{term}</dt>
+              <dd>{description}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Формулы</h2>
+        <div className="wiki-formula mono">Gross = (Sell bid / Buy ask - 1) × 10 000 bps</div>
+        <div className="wiki-formula mono">Net = Gross - комиссия покупки - комиссия продажи</div>
+        <div className="wiki-formula mono">Top capacity = min(Ask qty в base × Ask, Bid qty в base × Bid)</div>
+      </section>
+
+      <section className="wiki-section wiki-warning">
+        <h2>Важно</h2>
+        <p>
+          Положительный Net — это индикатор, а не гарантия исполнимой прибыли. Данные поступают через REST,
+          котировки двух бирж могут измениться между запросом и сделкой, а доступный объём может исчезнуть.
+          Перед любым решением вручную учитывайте проскальзывание, реальные комиссии, funding, ограничения
+          контрактов и риск неполного исполнения одной стороны.
+        </p>
+      </section>
+    </div>
+  )
+}
+
+function ScreenerWikiPage() {
+  const columns = [
+    ['#', 'Место инструмента в текущем рейтинге. Чем меньше номер, тем выше итоговый Score.'],
+    ['Ticker', 'Нормализованный тикер. Множитель является частью инструмента: PEPEUSDT и 1000PEPEUSDT не объединяются.'],
+    ['Exchanges', 'BN — инструмент есть на Binance, BB — на Bybit. Метка NEW означает, что инструмент доступен только на Bybit.'],
+    ['Price', 'Текущая цена. При наличии инструмента на обеих биржах приоритет имеют данные Binance, иначе используется Bybit.'],
+    ['Turnover', 'Оборот за 24 часа в долларах. Если инструмент есть на двух биржах, их обороты суммируются.'],
+    ['Range', 'Внутридневной диапазон: (High 24h − Low 24h) / Low 24h. Чем выше значение, тем активнее движение цены.'],
+    ['Corr', 'Корреляция часовых доходностей инструмента с BTC за последние 7 дней. Значение ближе к 1 означает сильное совместное движение; n/a — данных недостаточно.'],
+    ['Score', 'Итоговый относительный балл по волатильности, обороту, inplay и корреляции. Это ранг внутри текущей выборки, а не вероятность успешной сделки.'],
+    ['Prop', 'Метка yes означает, что инструмент присутствует в вашем prop list.'],
+  ]
+  const details = [
+    ['change', 'Изменение цены за последние 24 часа.'],
+    ['funding', 'Текущая ставка funding фьючерса. Знак и размер нужно оценивать с учётом направления планируемой позиции.'],
+    ['tick', 'Размер минимального шага цены относительно текущей цены, в процентах.'],
+    ['inplay', 'Инструмент движется заметно сильнее растущего рынка либо идёт против общего роста.'],
+  ]
+  return (
+    <div className="page wiki-page" role="tabpanel" aria-label="Screener wiki">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Справка</div><h1>Как читать скринер</h1></div>
+      </div>
+      <p className="wiki-lead">
+        Скринер анализирует бессрочные фьючерсы Binance и Bybit, отбрасывает инструменты,
+        не прошедшие фильтры объёма и движения, затем ранжирует оставшиеся монеты для ручного просмотра графиков.
+      </p>
+
+      <section className="wiki-section">
+        <h2>Порядок работы</h2>
+        <ol className="wiki-steps">
+          <li>Начните с верхних строк Top: они получили самый высокий Score в текущем снимке рынка.</li>
+          <li>Проверьте Turnover и Range, затем Corr, Inplay и наличие инструмента на нужной бирже.</li>
+          <li>Нажмите на строку, чтобы увидеть изменение за сутки, funding, относительный tick и флаг inplay.</li>
+          <li>Используйте поиск, фильтр биржи и prop only, чтобы сузить уже рассчитанный Top.</li>
+          <li>Откройте график выбранного инструмента и отдельно оцените уровни, формации и новости.</li>
+        </ol>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Сводные показатели</h2>
+        <dl className="wiki-terms">
+          <dt>Rows</dt><dd>Количество инструментов в текущем сохранённом Top.</dd>
+          <dt>Prop hits</dt><dd>Сколько строк Top входит в ваш prop list.</dd>
+          <dt>Inplay</dt><dd>Количество инструментов, которые сейчас выделяются относительно движения всего рынка.</dd>
+          <dt>Bybit only</dt><dd>Количество инструментов, найденных на Bybit и отсутствующих на Binance.</dd>
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Столбцы таблицы</h2>
+        <dl className="wiki-terms">
+          {columns.map(([term, description]) => (
+            <React.Fragment key={term}>
+              <dt>{term}</dt>
+              <dd>{description}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Данные раскрытой строки</h2>
+        <dl className="wiki-terms">
+          {details.map(([term, description]) => (
+            <React.Fragment key={term}>
+              <dt>{term}</dt>
+              <dd>{description}</dd>
+            </React.Fragment>
+          ))}
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Как рассчитывается Score</h2>
+        <p className="wiki-copy">
+          Range и Turnover переводятся в перцентили текущей выборки. К ним добавляется бонус Inplay
+          и вычитается штраф за корреляцию с BTC. Если инструмент находится в inplay, штраф корреляции
+          не применяется. Веса задаются во вкладке Settings.
+        </p>
+        <div className="wiki-formula mono">Score = Volatility + Turnover + Inplay − Corr penalty</div>
+      </section>
+
+      <section className="wiki-section">
+        <h2>History, Settings и prop list</h2>
+        <dl className="wiki-terms">
+          <dt>History</dt><dd>Показывает частоту попадания инструментов в Top, лидеров периода и сохранённые снимки.</dd>
+          <dt>Settings</dt><dd>Управляет минимальным оборотом, движением, порогом корреляции, весами Score и размером Top. Изменения применяются со следующим снимком.</dd>
+          <dt>Prop list</dt><dd>Личный список разрешённых инструментов проп-компании. Его можно редактировать вручную или импортировать из TXT.</dd>
+        </dl>
+      </section>
+
+      <section className="wiki-section wiki-warning">
+        <h2>Важно</h2>
+        <p>
+          Высокий Score не является торговым сигналом. Скринер сокращает список инструментов для анализа,
+          но не учитывает конкретную формацию, уровни, стакан, новости и ваш риск-менеджмент.
+          Рыночные данные обновляются периодически, поэтому перед решением проверяйте актуальный график на бирже.
+        </p>
+      </section>
     </div>
   )
 }
@@ -371,6 +743,9 @@ function SettingsPage({ onUnauthorized }) {
   const [ticker, setTicker] = useState('')
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
+  const [importStatus, setImportStatus] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [propOpen, setPropOpen] = useState(false)
 
   const load = async () => {
     try {
@@ -416,6 +791,51 @@ function SettingsPage({ onUnauthorized }) {
     await load()
   }
 
+  const importPropFile = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setError('')
+    setImportStatus('')
+    const isTextFile = file.name.toLowerCase().endsWith('.txt') || file.type === 'text/plain'
+    if (!isTextFile) {
+      setImportStatus('Only .txt files are supported')
+      return
+    }
+    setImporting(true)
+    try {
+      const parsed = parsePropListText(await file.text())
+      const existing = new Set(props.map((p) => instrumentKey(p.Instrument || p.instrument)))
+      const seenInFile = new Set()
+      const additions = []
+      let duplicates = 0
+
+      for (const instrument of parsed.instruments) {
+        const key = instrumentKey(instrument)
+        if (existing.has(key) || seenInFile.has(key)) {
+          duplicates += 1
+          continue
+        }
+        seenInFile.add(key)
+        additions.push({ Instrument: instrument, Note: '' })
+      }
+
+      if (additions.length === 0) {
+        setImportStatus(`Added 0, duplicates ${duplicates}, skipped ${parsed.skipped}`)
+        return
+      }
+
+      await api.savePropList([...props, ...additions])
+      setImportStatus(`Added ${additions.length}, duplicates ${duplicates}, skipped ${parsed.skipped}`)
+      await load()
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
   const removeProp = async (idx) => {
     await api.savePropList(props.filter((_, i) => i !== idx))
     await load()
@@ -425,9 +845,28 @@ function SettingsPage({ onUnauthorized }) {
     <div className="page">
       {error && <div className="banner">{error}</div>}
       <div className="section">
-        <div className="fx ac jb wrap gap12"><div className="sec-h">Prop list</div><div className="coverage">Items: <span className="fw7 pos">{props.length}</span></div></div>
-        <div className="fx gap8 prop-add"><input className="input f1" placeholder="Add ticker" value={ticker} onChange={(e) => setTicker(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addProp()} /><button className="btn" onClick={addProp}>Add</button></div>
-        <div className="chips">{props.map((p, idx) => <div className="chip" key={`${(p.Instrument || p.instrument)?.base}-${idx}`}><span className="mono fw6">{displaySymbol(p.Instrument || p.instrument)}</span>{(p.Note || p.note) && <span className="chipnote">{p.Note || p.note}</span>}<button className="chipx" onClick={() => removeProp(idx)}>x</button></div>)}</div>
+        <div className="fx ac jb wrap gap12">
+          <div className="fx ac gap12">
+            <div className="sec-h">Prop list</div>
+            <div className="coverage">Items: <span className="fw7 pos">{props.length}</span></div>
+          </div>
+          <button className="themebtn prop-toggle" onClick={() => setPropOpen((open) => !open)} title={propOpen ? 'Collapse prop list' : 'Expand prop list'}>
+            {propOpen ? <PanelTopClose size={16} /> : <PanelTopOpen size={16} />}
+          </button>
+        </div>
+        {propOpen && <>
+          <div className="fx gap8 prop-add">
+            <input className="input f1" placeholder="Add ticker" value={ticker} onChange={(e) => setTicker(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && addProp()} />
+            <button className="btn" onClick={addProp}>Add</button>
+            <label className={`btn upload-btn ${importing ? 'disabled' : ''}`}>
+              {importing ? <span className="spinner" /> : <Upload size={16} />}
+              Import TXT
+              <input type="file" accept=".txt,text/plain" onChange={importPropFile} disabled={importing} />
+            </label>
+          </div>
+          {importStatus && <div className="import-status mono">{importStatus}</div>}
+          <div className="chips">{props.map((p, idx) => <div className="chip" key={`${(p.Instrument || p.instrument)?.base}-${idx}`}><span className="mono fw6">{displaySymbol(p.Instrument || p.instrument)}</span>{(p.Note || p.note) && <span className="chipnote">{p.Note || p.note}</span>}<button className="chipx" onClick={() => removeProp(idx)}>x</button></div>)}</div>
+        </>}
       </div>
       <div className="section">
         <div className="sec-h">Scoring</div>
@@ -474,13 +913,76 @@ function displaySymbol(instrument = {}) {
 
 function parseTicker(raw) {
   let symbol = raw.trim().toUpperCase()
-  if (!symbol) return null
+  if (!symbol || !/^[A-Z0-9]+(USDT)?$/.test(symbol)) return null
   symbol = symbol.replace(/USDT$/, '')
+  if (!symbol || !/[A-Z]/.test(symbol)) return null
   for (const multiplier of [1000000, 10000, 1000, 100, 10]) {
     const prefix = String(multiplier)
-    if (symbol.startsWith(prefix) && symbol.length > prefix.length) return { Base: symbol.slice(prefix.length), Multiplier: multiplier }
+    if (symbol.startsWith(prefix) && symbol.length > prefix.length) {
+      const base = symbol.slice(prefix.length)
+      if (!/[A-Z]/.test(base)) return null
+      return { Base: base, Multiplier: multiplier }
+    }
   }
   return { Base: symbol, Multiplier: 1 }
+}
+
+function parsePropListText(text) {
+  const tokens = text.split(/[,\r\n]+/)
+  const instruments = []
+  let skipped = 0
+  for (const token of tokens) {
+    const trimmed = token.trim()
+    if (!trimmed) continue
+    const instrument = parseTicker(trimmed)
+    if (!instrument) {
+      skipped += 1
+      continue
+    }
+    instruments.push(instrument)
+  }
+  return { instruments, skipped }
+}
+
+function instrumentKey(instrument = {}) {
+  const base = instrument.base || instrument.Base || ''
+  const multiplier = instrument.multiplier || instrument.Multiplier || 1
+  return `${base.toUpperCase()}:${multiplier}`
+}
+
+function displayArbitrageSymbol(instrument = {}) {
+  const base = instrument.base || ''
+  const quote = instrument.quote || 'USDT'
+  const multiplier = instrument.multiplier || 1
+  return `${multiplier === 1 ? '' : multiplier}${base}${quote}`
+}
+
+function exchangeLabel(exchange = '') {
+  const labels = { binance: 'BN', bybit: 'BB', okx: 'OKX' }
+  return labels[String(exchange).toLowerCase()] || String(exchange).toUpperCase()
+}
+
+function formatUpdated(value) {
+  if (!value || new Date(value).getFullYear() <= 1) return 'waiting for data'
+  return new Date(value).toLocaleString()
+}
+
+function latestTime(...values) {
+  const valid = values.filter(Boolean).map((value) => new Date(value)).filter((value) => !Number.isNaN(value.getTime()) && value.getFullYear() > 1)
+  if (!valid.length) return ''
+  return `updated ${new Date(Math.max(...valid.map((value) => value.getTime()))).toLocaleTimeString()}`
+}
+
+function fmtBps(value = 0) {
+  return `${Number(value || 0).toFixed(1)} bps`
+}
+
+function fmtDuration(from, to) {
+  if (!from || !to) return '-'
+  const seconds = Math.max(0, Math.floor((new Date(to) - new Date(from)) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
 }
 
 function fmtMoney(value = 0) {

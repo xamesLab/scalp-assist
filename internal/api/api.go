@@ -18,6 +18,8 @@ import (
 	"sync"
 	"time"
 
+	"scalp-assist/internal/arbitrage"
+	arbitragemodel "scalp-assist/internal/arbitrage/model"
 	"scalp-assist/internal/config"
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/store"
@@ -31,6 +33,7 @@ type Server struct {
 	jwtSecret     []byte
 	secureCookies bool
 	refresh       func(context.Context) error
+	arbitrage     *arbitrage.Service
 	loginLimiter  *loginLimiter
 	now           func() time.Time
 }
@@ -41,6 +44,7 @@ type Options struct {
 	JWTSecret     []byte
 	SecureCookies bool
 	Refresh       func(context.Context) error
+	Arbitrage     *arbitrage.Service
 }
 
 func New(opts Options) *Server {
@@ -50,6 +54,7 @@ func New(opts Options) *Server {
 		jwtSecret:     opts.JWTSecret,
 		secureCookies: opts.SecureCookies,
 		refresh:       opts.Refresh,
+		arbitrage:     opts.Arbitrage,
 		loginLimiter:  newLoginLimiter(5, time.Minute),
 		now:           time.Now,
 	}
@@ -68,7 +73,100 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/prop-list", s.withAuth(s.propList))
 	mux.HandleFunc("/api/settings", s.withAuth(s.settings))
 	mux.HandleFunc("/api/refresh", s.withAuth(s.refreshHandler))
+	mux.HandleFunc("/api/dashboard/summary", s.withAuth(s.dashboardSummary))
+	mux.HandleFunc("/api/arbitrage/opportunities", s.withAuth(s.arbitrageOpportunities))
+	mux.HandleFunc("/api/arbitrage/stats", s.withAuth(s.arbitrageStats))
+	mux.HandleFunc("/api/arbitrage/refresh", s.withAuth(s.arbitrageRefresh))
+	mux.HandleFunc("/api/screener/top", s.withAuth(s.top))
+	mux.HandleFunc("/api/screener/history", s.withAuth(s.history))
+	mux.HandleFunc("/api/screener/snapshots", s.withAuth(s.snapshots))
+	mux.HandleFunc("/api/screener/stats", s.withAuth(s.stats))
+	mux.HandleFunc("/api/screener/prop-list", s.withAuth(s.propList))
+	mux.HandleFunc("/api/screener/settings", s.withAuth(s.settings))
+	mux.HandleFunc("/api/screener/refresh", s.withAuth(s.refreshHandler))
 	return mux
+}
+
+func (s *Server) dashboardSummary(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	screener, err := s.store.LatestSnapshotOverview(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	arbitrageRun, err := s.latestArbitrageRun(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"screener": screener,
+		"arbitrage": map[string]any{
+			"updated_at":    arbitrageRun.ObservedAt,
+			"instruments":   arbitrageRun.Instruments,
+			"opportunities": len(arbitrageRun.Opportunities),
+			"exchanges":     arbitrageRun.ExchangeState,
+		},
+	})
+}
+
+func (s *Server) arbitrageOpportunities(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	run, err := s.latestArbitrageRun(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	limit := queryInt(r, "limit", len(run.Opportunities))
+	if limit > 0 && limit < len(run.Opportunities) {
+		run.Opportunities = run.Opportunities[:limit]
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) arbitrageStats(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	stats, err := s.store.ArbitrageStats(r.Context(), queryInt(r, "days", 7))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) arbitrageRefresh(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.arbitrage == nil {
+		writeJSON(w, http.StatusAccepted, map[string]any{"ok": true, "scheduled": false})
+		return
+	}
+	if err := s.arbitrage.Refresh(r.Context()); err != nil {
+		writeError(w, http.StatusConflict, "refresh_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) latestArbitrageRun(ctx context.Context) (arbitragemodel.Run, error) {
+	if s.arbitrage != nil {
+		run := s.arbitrage.Latest()
+		if !run.ObservedAt.IsZero() {
+			return run, nil
+		}
+	}
+	return s.store.LatestArbitrageRun(ctx)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

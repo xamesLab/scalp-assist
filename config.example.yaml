@@ -7,6 +7,7 @@ db_path: "./data/screener.db"
 cycles:
   fast_interval: 15m
   slow_interval: 2h
+  arbitrage_interval: 10s
 
 settings:
   min_volume_usd: 100000000
@@ -22,6 +23,22 @@ settings:
     inplay: 0.2
     corr: 0.1
   top_n: 20
+
+arbitrage:
+  min_gross_spread_bps: 1
+  max_gross_spread_bps: 1000
+  min_net_spread_bps: -20
+  min_capacity_usd: 1000
+  max_quote_age: 30s
+  max_quote_skew: 10s
+  top_n: 30
+  funding_candidates: 20
+  history_interval: 1m
+  retention_days: 30
+  fees_bps:
+    binance: 5
+    bybit: 5.5
+    okx: 5
 
 blacklist:
   - USDC

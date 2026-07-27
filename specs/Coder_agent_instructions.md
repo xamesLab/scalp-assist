@@ -1,75 +1,93 @@
 # Инструкция для кодового агента
 
+**Версия:** 2.0
+**Дата:** 27.07.2026
+
 ## Контекст проекта
 
-Проект `scalp-assist` — персональный веб-сервис-скринер фьючерсов Binance и Bybit для отбора топ-20 инструментов под скальпинг. Основные требования лежат в:
+`scalp-assist` — один self-hosted веб-сервис с общей авторизацией и независимыми
+информационными контурами:
+
+- скринер Binance/Bybit;
+- статистика межбиржевого арбитража Binance/Bybit/OKX.
+
+Главные документы:
 
 - `specs/PRD_trading_assistant.md`
 - `specs/Dev_plan_MVP.md`
 - `specs/Deploy_VPS_guide.md`
 - `specs/Summary_описание_проекта.md`
+- `specs/Screener_contour_agent_guide.md` — подробные инварианты скринера
+- `specs/Arbitrage_contour_agent_guide.md` — подробные инварианты арбитража
 
-При конфликте документов приоритет такой: PRD и Dev plan выше HTML-мокапа. HTML-мокап используется как эталон визуального стиля, но местами старее актуального MVP.
+При конфликте PRD и Dev plan выше старого HTML-мокапа. Мокап задаёт визуальный
+язык скринера, но не актуальную информационную архитектуру всего приложения.
 
-## Важное правило для живых запросов к биржам
+## Архитектурные правила
 
-В локальной среде пользователя настроен VPN, и запросы к Binance/Bybit проходят через системный `cmd.exe`.
+- Сохранять один Go-процесс и одну SQLite БД, пока нагрузка не требует
+  обоснованного разделения.
+- Контуры разделять по доменным пакетам, сервисам, API namespace и таблицам.
+- Общими оставлять exchange adapters, HTTP/retry, rate-limit metadata,
+  нормализацию контрактов и market-data cache.
+- Один экземпляр клиента Binance/Bybit должен инжектироваться во все контуры.
+  Не создавать отдельные клиенты внутри scheduler/service.
+- Перед добавлением биржевого запроса проверять, нельзя ли переиспользовать уже
+  полученный payload. Каталоги имеют длинный TTL, all-market tickers/BBO —
+  короткий TTL; конкурентные cache miss должны coalesce в один запрос.
+- Скринер не должен зависеть от типов арбитража и наоборот. Общими могут быть
+  только нейтральные типы `domain`/`marketdata`.
+- Арбитраж остаётся read-only: никаких API-ключей, ордеров и формулировок,
+  обещающих исполнимую прибыль.
 
-Для live-smoke проверок API использовать именно:
+## Живые запросы к биржам
+
+На Windows-машине владельца VPN применяется к запросам через системный
+`cmd.exe`. Все ручные live-smoke команды выполнять именно так:
 
 ```powershell
 C:\Windows\System32\cmd.exe /c curl -s -i https://fapi.binance.com/fapi/v1/time
 C:\Windows\System32\cmd.exe /c curl -s -i https://api.bybit.com/v5/market/time
+C:\Windows\System32\cmd.exe /c curl -s -i "https://www.okx.com/api/v5/public/time"
 ```
 
-Проверено 08.07.2026: оба запроса через `cmd.exe` возвращают `HTTP/1.1 200 OK`.
+Успех: HTTP 200; Binance содержит `serverTime`, Bybit — `retCode: 0`, OKX —
+`code: "0"`. Обычный PowerShell/Go-процесс может обойти VPN-маршрут и получить
+451/403, поэтому его результат не использовать для вывода о доступности API.
 
-Ожидаемые признаки успешного ответа:
+Обычные тесты не должны требовать сеть. Live-тесты держать под build tag
+`integration`, а ответы контрактов проверять через fixtures/`httptest`.
 
-- Binance: JSON с `serverTime`
-- Bybit: JSON с `retCode: 0`
+## Frontend routing
 
-Если запускать сетевые проверки обычным PowerShell/Go-процессом, запросы могут не использовать VPN-маршрут и получать геоблок:
+- `/` — публичный лендинг.
+- `/auth` — вход.
+- `/app` — главная приватная сводка по контурам.
+- `/app/screener`, `/app/screener/history`, `/app/screener/settings` — рабочие
+  страницы скринера.
+- `/app/screener/wiki` — русскоязычная справка; обновлять вместе с колонками,
+  формулой score и трактовкой флагов.
+- `/app/arbitrage` — List арбитража.
+- `/app/arbitrage/settings` — зарезервированная пустая вкладка Settings.
+- `/app/arbitrage/wiki` — реализованная русскоязычная справка; синхронизировать
+  её с таблицей и формулами при изменении расчётов.
+- После login переходить на `/app`.
+- При 401 переходить на `/auth`.
+- После logout переходить на `/`.
 
-- Binance: `451 Service unavailable from a restricted location`
-- Bybit: `403 CloudFront distribution is configured to block access from your country`
+Старые `/app/top`, `/app/history`, `/app/settings` пока сохраняются для
+совместимости, но новые ссылки должны использовать namespace `/app/screener/*`.
 
-Поэтому для ручной диагностики и live API smoke-команд в этой машине предпочитать `cmd.exe /c curl ...`.
-
-## Git и этапы
-
-Работать небольшими этапами и коммитить после зелёных тестов. Уже принятый стиль коммитов:
-
-- `Implement exchange clients`
-- `Implement symbol normalization`
-- `Implement metrics filters`
-- `Implement scoring top`
-
-Перед финальным ответом проверять:
+## Проверки перед завершением
 
 ```powershell
 $env:GO111MODULE='on'; go test ./...
 $env:GO111MODULE='on'; go build -o $env:TEMP\screener-check.exe ./cmd/screener
+Set-Location web; npm.cmd run build; Set-Location ..
+git diff --check
 git status --short
 ```
 
-## Текущие технические решения
-
-- Go module: `scalp-assist`
-- Минимальная версия в `go.mod`: `go 1.22`
-- Конфиг: YAML через `gopkg.in/yaml.v3`
-- Логи: `log/slog`, JSON
-- Обычные тесты не должны требовать сеть
-- Live API tests держать под build tag `integration`
-- Для Binance/Bybit используются только публичные market endpoints, без API-ключей
-
-## Frontend routing decision
-
-Перед реализацией фронтенда зафиксировано новое требование:
-
-- `/` — публичный лендинг без авторизации, главная страница сервиса.
-- `/auth` — отдельная страница авторизации/регистрации. В MVP backend поддерживает login существующей bootstrap-учётки; registration UI допускается только как задел, без вызова несуществующего API.
-- `/app/top`, `/app/history`, `/app/settings` — приватные страницы, доступны только авторизованным пользователям.
-- После успешного login редиректить на `/app/top`.
-- При 401 в приватной зоне редиректить на `/auth`.
-- После logout принудительно редиректить на публичный лендинг `/`.
+Для арбитража отдельно проверить fixtures всех трёх бирж, деградацию при отказе
+одной биржи, stale/skew/multiplier filters, комиссии, capacity и миграцию БД.
+Не коммитить runtime БД, JWT secret, бинарники и пользовательские списки.

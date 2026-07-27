@@ -10,12 +10,15 @@ import (
 
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange"
+	"scalp-assist/internal/marketdata"
 )
 
 const DefaultBaseURL = "https://api.bybit.com"
 
 type Client struct {
-	http *exchange.Client
+	http           *exchange.Client
+	contractsCache marketdata.Cache[contractsResult]
+	tickersCache   marketdata.Cache[tickerResponseResult]
 }
 
 func New() *Client {
@@ -26,68 +29,90 @@ func NewWithBaseURL(baseURL string) *Client {
 	return &Client{http: exchange.NewClient(baseURL)}
 }
 
+func (c *Client) Exchange() domain.Exchange {
+	return domain.ExchangeBybit
+}
+
 func (c *Client) InstrumentsInfo(ctx context.Context) ([]domain.ContractSpec, map[string]string, error) {
-	var all []domain.ContractSpec
-	headers := map[string]string{}
-	cursor := ""
+	result, err := c.contractsCache.Get(ctx, 6*time.Hour, func(ctx context.Context) (contractsResult, error) {
+		var all []domain.ContractSpec
+		headers := map[string]string{}
+		cursor := ""
 
-	for {
-		query := url.Values{}
-		query.Set("category", "linear")
-		query.Set("limit", "1000")
-		if cursor != "" {
-			query.Set("cursor", cursor)
-		}
-
-		var resp instrumentsResponse
-		meta, err := c.http.GetJSON(ctx, "/v5/market/instruments-info", query, &resp)
-		if err != nil {
-			return nil, nil, wrapErr(err)
-		}
-		if err := checkRetCode(resp.RetCode, resp.RetMsg); err != nil {
-			return nil, nil, err
-		}
-		merge(headers, exchange.HeaderSubset(meta.Headers, "X-Bapi-Limit", "X-Bapi-Limit-Status", "X-Bapi-Limit-Reset-Timestamp"))
-
-		for _, item := range resp.Result.List {
-			tickSize, err := parseFloat(item.PriceFilter.TickSize)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse tickSize for %s: %w", item.Symbol, err)
+		for {
+			query := url.Values{}
+			query.Set("category", "linear")
+			query.Set("limit", "1000")
+			if cursor != "" {
+				query.Set("cursor", cursor)
 			}
-			all = append(all, domain.ContractSpec{
-				Exchange:     domain.ExchangeBybit,
-				Symbol:       item.Symbol,
-				BaseAsset:    item.BaseCoin,
-				QuoteAsset:   item.QuoteCoin,
-				Status:       item.Status,
-				ContractType: item.ContractType,
-				TickSize:     tickSize,
-			})
-		}
-		cursor = resp.Result.NextPageCursor
-		if cursor == "" {
-			break
-		}
-	}
 
-	return all, headers, nil
+			var resp instrumentsResponse
+			meta, err := c.http.GetJSON(ctx, "/v5/market/instruments-info", query, &resp)
+			if err != nil {
+				return contractsResult{}, wrapErr(err)
+			}
+			if err := checkRetCode(resp.RetCode, resp.RetMsg); err != nil {
+				return contractsResult{}, err
+			}
+			merge(headers, exchange.HeaderSubset(meta.Headers, "X-Bapi-Limit", "X-Bapi-Limit-Status", "X-Bapi-Limit-Reset-Timestamp"))
+
+			for _, item := range resp.Result.List {
+				tickSize, err := parseFloat(item.PriceFilter.TickSize)
+				if err != nil {
+					return contractsResult{}, fmt.Errorf("parse tickSize for %s: %w", item.Symbol, err)
+				}
+				quantityStep, err := parseFloat(item.LotSizeFilter.QtyStep)
+				if err != nil {
+					return contractsResult{}, fmt.Errorf("parse qtyStep for %s: %w", item.Symbol, err)
+				}
+				all = append(all, domain.ContractSpec{
+					Exchange:     domain.ExchangeBybit,
+					Symbol:       item.Symbol,
+					BaseAsset:    item.BaseCoin,
+					QuoteAsset:   item.QuoteCoin,
+					Status:       item.Status,
+					ContractType: item.ContractType,
+					TickSize:     tickSize,
+					QuantityStep: quantityStep,
+				})
+			}
+			cursor = resp.Result.NextPageCursor
+			if cursor == "" {
+				break
+			}
+		}
+		return contractsResult{contracts: all, headers: headers}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return append([]domain.ContractSpec(nil), result.contracts...), cloneMap(result.headers), nil
 }
 
 func (c *Client) Tickers(ctx context.Context) ([]domain.Ticker, map[string]string, error) {
-	query := url.Values{}
-	query.Set("category", "linear")
-
-	var resp tickersResponse
-	meta, err := c.http.GetJSON(ctx, "/v5/market/tickers", query, &resp)
+	result, err := c.tickersCache.Get(ctx, 2*time.Second, func(ctx context.Context) (tickerResponseResult, error) {
+		query := url.Values{}
+		query.Set("category", "linear")
+		var resp tickersResponse
+		meta, err := c.http.GetJSON(ctx, "/v5/market/tickers", query, &resp)
+		if err != nil {
+			return tickerResponseResult{}, wrapErr(err)
+		}
+		if err := checkRetCode(resp.RetCode, resp.RetMsg); err != nil {
+			return tickerResponseResult{}, err
+		}
+		return tickerResponseResult{
+			response: resp,
+			headers:  exchange.HeaderSubset(meta.Headers, "X-Bapi-Limit", "X-Bapi-Limit-Status", "X-Bapi-Limit-Reset-Timestamp"),
+		}, nil
+	})
 	if err != nil {
-		return nil, nil, wrapErr(err)
-	}
-	if err := checkRetCode(resp.RetCode, resp.RetMsg); err != nil {
 		return nil, nil, err
 	}
 
-	tickers := make([]domain.Ticker, 0, len(resp.Result.List))
-	for _, item := range resp.Result.List {
+	tickers := make([]domain.Ticker, 0, len(result.response.Result.List))
+	for _, item := range result.response.Result.List {
 		price, err := parseFloat(item.LastPrice)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse lastPrice for %s: %w", item.Symbol, err)
@@ -113,6 +138,13 @@ func (c *Client) Tickers(ctx context.Context) ([]domain.Ticker, map[string]strin
 			return nil, nil, fmt.Errorf("parse fundingRate for %s: %w", item.Symbol, err)
 		}
 		oi, _ := parseFloat(item.OpenInterestValue)
+		bidPrice, _ := parseFloat(item.Bid1Price)
+		askPrice, _ := parseFloat(item.Ask1Price)
+		bidQty, _ := parseFloat(item.Bid1Size)
+		askQty, _ := parseFloat(item.Ask1Size)
+		markPrice, _ := parseFloat(item.MarkPrice)
+		nextFundingMS, _ := strconv.ParseInt(item.NextFundingTime, 10, 64)
+		fundingHours, _ := strconv.ParseFloat(item.FundingIntervalHour, 64)
 		tickers = append(tickers, domain.Ticker{
 			Symbol:          item.Symbol,
 			SourceSymbol:    item.Symbol,
@@ -123,10 +155,63 @@ func (c *Client) Tickers(ctx context.Context) ([]domain.Ticker, map[string]strin
 			ChangePct24h:    change * 100,
 			TurnoverUSD:     turnover,
 			FundingRate:     funding,
+			FundingKnown:    item.FundingRate != "",
 			OpenInterestUSD: oi,
+			BidPrice:        bidPrice,
+			AskPrice:        askPrice,
+			BidQuantity:     bidQty,
+			AskQuantity:     askQty,
+			MarkPrice:       markPrice,
+			NextFundingTime: time.UnixMilli(nextFundingMS),
+			FundingInterval: time.Duration(fundingHours * float64(time.Hour)),
+			UpdatedAt:       time.UnixMilli(result.response.Time),
 		})
 	}
-	return tickers, exchange.HeaderSubset(meta.Headers, "X-Bapi-Limit", "X-Bapi-Limit-Status", "X-Bapi-Limit-Reset-Timestamp"), nil
+	return tickers, cloneMap(result.headers), nil
+}
+
+func (c *Client) Quotes(ctx context.Context) ([]domain.VenueQuote, error) {
+	contracts, _, err := c.InstrumentsInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tickers, _, err := c.Tickers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	bySymbol := make(map[string]domain.ContractSpec, len(contracts))
+	for _, contract := range contracts {
+		bySymbol[contract.Symbol] = contract
+	}
+	out := make([]domain.VenueQuote, 0, len(tickers))
+	for _, ticker := range tickers {
+		contract, ok := bySymbol[ticker.SourceSymbol]
+		if !ok {
+			continue
+		}
+		quote := domain.VenueQuote{
+			Exchange:           domain.ExchangeBybit,
+			SourceSymbol:       ticker.SourceSymbol,
+			Contract:           contract,
+			BidPrice:           ticker.BidPrice,
+			AskPrice:           ticker.AskPrice,
+			BidQuantity:        ticker.BidQuantity,
+			AskQuantity:        ticker.AskQuantity,
+			QuantityMultiplier: 1,
+			LastPrice:          ticker.Price,
+			MarkPrice:          ticker.MarkPrice,
+			TurnoverUSD:        ticker.TurnoverUSD,
+			FundingInterval:    ticker.FundingInterval,
+			NextFundingTime:    ticker.NextFundingTime,
+			UpdatedAt:          ticker.UpdatedAt,
+		}
+		if ticker.FundingKnown {
+			rate := ticker.FundingRate
+			quote.FundingRate = &rate
+		}
+		out = append(out, quote)
+	}
+	return out, nil
 }
 
 func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int) ([]domain.Kline, map[string]string, error) {
@@ -244,6 +329,9 @@ type instrumentsResponse struct {
 			PriceFilter  struct {
 				TickSize string `json:"tickSize"`
 			} `json:"priceFilter"`
+			LotSizeFilter struct {
+				QtyStep string `json:"qtyStep"`
+			} `json:"lotSizeFilter"`
 		} `json:"list"`
 	} `json:"result"`
 }
@@ -251,18 +339,36 @@ type instrumentsResponse struct {
 type tickersResponse struct {
 	RetCode int    `json:"retCode"`
 	RetMsg  string `json:"retMsg"`
+	Time    int64  `json:"time"`
 	Result  struct {
 		List []struct {
-			Symbol            string `json:"symbol"`
-			LastPrice         string `json:"lastPrice"`
-			HighPrice24h      string `json:"highPrice24h"`
-			LowPrice24h       string `json:"lowPrice24h"`
-			Price24hPcnt      string `json:"price24hPcnt"`
-			Turnover24h       string `json:"turnover24h"`
-			FundingRate       string `json:"fundingRate"`
-			OpenInterestValue string `json:"openInterestValue"`
+			Symbol              string `json:"symbol"`
+			LastPrice           string `json:"lastPrice"`
+			HighPrice24h        string `json:"highPrice24h"`
+			LowPrice24h         string `json:"lowPrice24h"`
+			Price24hPcnt        string `json:"price24hPcnt"`
+			Turnover24h         string `json:"turnover24h"`
+			FundingRate         string `json:"fundingRate"`
+			OpenInterestValue   string `json:"openInterestValue"`
+			MarkPrice           string `json:"markPrice"`
+			Bid1Price           string `json:"bid1Price"`
+			Ask1Price           string `json:"ask1Price"`
+			Bid1Size            string `json:"bid1Size"`
+			Ask1Size            string `json:"ask1Size"`
+			NextFundingTime     string `json:"nextFundingTime"`
+			FundingIntervalHour string `json:"fundingIntervalHour"`
 		} `json:"list"`
 	} `json:"result"`
+}
+
+type contractsResult struct {
+	contracts []domain.ContractSpec
+	headers   map[string]string
+}
+
+type tickerResponseResult struct {
+	response tickersResponse
+	headers  map[string]string
 }
 
 type klineResponse struct {
@@ -278,4 +384,12 @@ func parseFloat(raw string) (float64, error) {
 		return 0, nil
 	}
 	return strconv.ParseFloat(raw, 64)
+}
+
+func cloneMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }

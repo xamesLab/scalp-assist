@@ -1,8 +1,10 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"scalp-assist/internal/domain"
 )
@@ -18,6 +20,39 @@ func TestLoadExampleConfig(t *testing.T) {
 	}
 	if cfg.DBPath == "" {
 		t.Fatal("DBPath must not be empty")
+	}
+}
+
+func TestLoadAppliesArbitrageDefaultsToLegacyConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.yaml")
+	raw := []byte(`
+db_path: ./test.db
+cycles:
+  fast_interval: 15m
+  slow_interval: 2h
+settings:
+  min_volume_usd: 100000000
+  min_change_pct: 20
+  corr_threshold: 0.8
+  inplay:
+    market_threshold_pct: 3
+    multiplier: 2
+  weights:
+    volatility: 0.4
+    turnover: 0.3
+    inplay: 0.2
+    corr: 0.1
+  top_n: 20
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cycles.ArbitrageInterval != 10*time.Second || cfg.Arbitrage.TopN != 30 {
+		t.Fatalf("defaults not applied: %+v", cfg)
 	}
 }
 

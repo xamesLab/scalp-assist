@@ -21,6 +21,17 @@ type Options struct {
 	Logger    *slog.Logger
 }
 
+type InstrumentIdentity struct {
+	Base       string
+	Quote      string
+	Multiplier int
+}
+
+type Resolver struct {
+	blacklist map[string]struct{}
+	overrides map[string]identity
+}
+
 type identity struct {
 	base       string
 	multiplier int
@@ -33,8 +44,7 @@ var stableBases = map[string]struct{}{
 var multipliers = []int{1000000, 10000, 1000, 100, 10}
 
 func FromSnapshots(snapshots []domain.MarketSnapshot, opts Options) ([]InstrumentData, error) {
-	blacklist := makeSet(opts.Blacklist)
-	overrides, err := parseOverrides(opts.Overrides)
+	resolver, err := NewResolver(opts.Blacklist, opts.Overrides)
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +72,7 @@ func FromSnapshots(snapshots []domain.MarketSnapshot, opts Options) ([]Instrumen
 					TickSize:   ticker.TickSize,
 				}
 			}
-			id, include, err := normalizeContract(contract, blacklist, overrides)
+			resolved, include, err := resolver.Resolve(contract)
 			if err != nil {
 				if opts.Logger != nil {
 					opts.Logger.Warn("unknown symbol pattern", "exchange", contract.Exchange, "symbol", contract.Symbol, "error", err)
@@ -72,6 +82,7 @@ func FromSnapshots(snapshots []domain.MarketSnapshot, opts Options) ([]Instrumen
 			if !include {
 				continue
 			}
+			id := identity{base: resolved.Base, multiplier: resolved.Multiplier}
 			item := byID[id]
 			if item == nil {
 				item = &InstrumentData{
@@ -112,6 +123,33 @@ func FromSnapshots(snapshots []domain.MarketSnapshot, opts Options) ([]Instrumen
 		out = append(out, *item)
 	}
 	return out, nil
+}
+
+func NewResolver(blacklist []string, overrides map[string]string) (*Resolver, error) {
+	parsed, err := parseOverrides(overrides)
+	if err != nil {
+		return nil, err
+	}
+	return &Resolver{
+		blacklist: makeSet(blacklist),
+		overrides: parsed,
+	}, nil
+}
+
+func (r *Resolver) Resolve(contract domain.ContractSpec) (InstrumentIdentity, bool, error) {
+	id, include, err := normalizeContract(contract, r.blacklist, r.overrides)
+	if err != nil || !include {
+		return InstrumentIdentity{}, include, err
+	}
+	quote := strings.ToUpper(contract.QuoteAsset)
+	if quote == "" {
+		quote = detectQuote(strings.ToUpper(contract.Symbol))
+	}
+	return InstrumentIdentity{
+		Base:       id.base,
+		Quote:      quote,
+		Multiplier: id.multiplier,
+	}, true, nil
 }
 
 func normalizeContract(contract domain.ContractSpec, blacklist map[string]struct{}, overrides map[string]identity) (identity, bool, error) {

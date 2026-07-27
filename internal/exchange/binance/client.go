@@ -6,16 +6,22 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange"
+	"scalp-assist/internal/marketdata"
 )
 
 const DefaultBaseURL = "https://fapi.binance.com"
 
 type Client struct {
-	http *exchange.Client
+	http           *exchange.Client
+	contractsCache marketdata.Cache[contractsResult]
+	statsCache     marketdata.Cache[tickersResult]
+	fundingCache   marketdata.Cache[fundingResult]
+	bookCache      marketdata.Cache[bookResult]
 }
 
 func New() *Client {
@@ -26,88 +32,243 @@ func NewWithBaseURL(baseURL string) *Client {
 	return &Client{http: exchange.NewClient(baseURL)}
 }
 
-func (c *Client) ExchangeInfo(ctx context.Context) ([]domain.ContractSpec, map[string]string, error) {
-	var resp exchangeInfoResponse
-	meta, err := c.http.GetJSON(ctx, "/fapi/v1/exchangeInfo", nil, &resp)
-	if err != nil {
-		return nil, nil, wrapErr(err)
-	}
+func (c *Client) Exchange() domain.Exchange {
+	return domain.ExchangeBinance
+}
 
-	specs := make([]domain.ContractSpec, 0, len(resp.Symbols))
-	for _, s := range resp.Symbols {
-		specs = append(specs, domain.ContractSpec{
-			Exchange:     domain.ExchangeBinance,
-			Symbol:       s.Symbol,
-			BaseAsset:    s.BaseAsset,
-			QuoteAsset:   s.QuoteAsset,
-			Status:       s.Status,
-			ContractType: s.ContractType,
-			TickSize:     priceFilterTickSize(s.Filters),
-		})
+func (c *Client) ExchangeInfo(ctx context.Context) ([]domain.ContractSpec, map[string]string, error) {
+	result, err := c.contractsCache.Get(ctx, 6*time.Hour, func(ctx context.Context) (contractsResult, error) {
+		var resp exchangeInfoResponse
+		meta, err := c.http.GetJSON(ctx, "/fapi/v1/exchangeInfo", nil, &resp)
+		if err != nil {
+			return contractsResult{}, wrapErr(err)
+		}
+
+		specs := make([]domain.ContractSpec, 0, len(resp.Symbols))
+		for _, s := range resp.Symbols {
+			specs = append(specs, domain.ContractSpec{
+				Exchange:     domain.ExchangeBinance,
+				Symbol:       s.Symbol,
+				BaseAsset:    s.BaseAsset,
+				QuoteAsset:   s.QuoteAsset,
+				Status:       s.Status,
+				ContractType: s.ContractType,
+				TickSize:     priceFilterTickSize(s.Filters),
+			})
+		}
+		return contractsResult{
+			contracts: specs,
+			headers:   exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"),
+		}, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return specs, exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"), nil
+	return append([]domain.ContractSpec(nil), result.contracts...), cloneMap(result.headers), nil
 }
 
 func (c *Client) Tickers24h(ctx context.Context) ([]domain.Ticker, map[string]string, error) {
-	var resp []ticker24hResponse
-	meta, err := c.http.GetJSON(ctx, "/fapi/v1/ticker/24hr", nil, &resp)
-	if err != nil {
-		return nil, nil, wrapErr(err)
-	}
+	result, err := c.statsCache.Get(ctx, time.Minute, func(ctx context.Context) (tickersResult, error) {
+		var resp []ticker24hResponse
+		meta, err := c.http.GetJSON(ctx, "/fapi/v1/ticker/24hr", nil, &resp)
+		if err != nil {
+			return tickersResult{}, wrapErr(err)
+		}
 
-	tickers := make([]domain.Ticker, 0, len(resp))
-	for _, t := range resp {
-		price, err := parseFloat(t.LastPrice)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse lastPrice for %s: %w", t.Symbol, err)
+		tickers := make([]domain.Ticker, 0, len(resp))
+		for _, t := range resp {
+			price, err := parseFloat(t.LastPrice)
+			if err != nil {
+				return tickersResult{}, fmt.Errorf("parse lastPrice for %s: %w", t.Symbol, err)
+			}
+			high, err := parseFloat(t.HighPrice)
+			if err != nil {
+				return tickersResult{}, fmt.Errorf("parse highPrice for %s: %w", t.Symbol, err)
+			}
+			low, err := parseFloat(t.LowPrice)
+			if err != nil {
+				return tickersResult{}, fmt.Errorf("parse lowPrice for %s: %w", t.Symbol, err)
+			}
+			change, err := parseFloat(t.PriceChangePercent)
+			if err != nil {
+				return tickersResult{}, fmt.Errorf("parse priceChangePercent for %s: %w", t.Symbol, err)
+			}
+			turnover, err := parseFloat(t.QuoteVolume)
+			if err != nil {
+				return tickersResult{}, fmt.Errorf("parse quoteVolume for %s: %w", t.Symbol, err)
+			}
+			tickers = append(tickers, domain.Ticker{
+				Symbol:       t.Symbol,
+				SourceSymbol: t.Symbol,
+				Exchange:     domain.ExchangeBinance,
+				Price:        price,
+				High24h:      high,
+				Low24h:       low,
+				ChangePct24h: change,
+				TurnoverUSD:  turnover,
+				UpdatedAt:    time.UnixMilli(t.CloseTime),
+			})
 		}
-		high, err := parseFloat(t.HighPrice)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse highPrice for %s: %w", t.Symbol, err)
-		}
-		low, err := parseFloat(t.LowPrice)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse lowPrice for %s: %w", t.Symbol, err)
-		}
-		change, err := parseFloat(t.PriceChangePercent)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse priceChangePercent for %s: %w", t.Symbol, err)
-		}
-		turnover, err := parseFloat(t.QuoteVolume)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse quoteVolume for %s: %w", t.Symbol, err)
-		}
-		tickers = append(tickers, domain.Ticker{
-			Symbol:       t.Symbol,
-			SourceSymbol: t.Symbol,
-			Exchange:     domain.ExchangeBinance,
-			Price:        price,
-			High24h:      high,
-			Low24h:       low,
-			ChangePct24h: change,
-			TurnoverUSD:  turnover,
-			UpdatedAt:    time.UnixMilli(t.CloseTime),
-		})
+		return tickersResult{
+			tickers: tickers,
+			headers: exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"),
+		}, nil
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	return tickers, exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"), nil
+	return append([]domain.Ticker(nil), result.tickers...), cloneMap(result.headers), nil
 }
 
 func (c *Client) PremiumIndex(ctx context.Context) (map[string]float64, map[string]string, error) {
-	var resp []premiumIndexResponse
-	meta, err := c.http.GetJSON(ctx, "/fapi/v1/premiumIndex", nil, &resp)
+	funding, headers, err := c.Funding(ctx)
 	if err != nil {
-		return nil, nil, wrapErr(err)
+		return nil, nil, err
+	}
+	values := make(map[string]float64, len(funding))
+	for symbol, info := range funding {
+		values[symbol] = info.Rate
+	}
+	return values, headers, nil
+}
+
+func (c *Client) Funding(ctx context.Context) (map[string]domain.FundingInfo, map[string]string, error) {
+	result, err := c.fundingCache.Get(ctx, time.Minute, func(ctx context.Context) (fundingResult, error) {
+		var resp []premiumIndexResponse
+		meta, err := c.http.GetJSON(ctx, "/fapi/v1/premiumIndex", nil, &resp)
+		if err != nil {
+			return fundingResult{}, wrapErr(err)
+		}
+		values := make(map[string]domain.FundingInfo, len(resp))
+		for _, p := range resp {
+			value, err := parseFloat(p.LastFundingRate)
+			if err != nil {
+				return fundingResult{}, fmt.Errorf("parse lastFundingRate for %s: %w", p.Symbol, err)
+			}
+			var markPrice float64
+			if p.MarkPrice != "" {
+				markPrice, err = parseFloat(p.MarkPrice)
+				if err != nil {
+					return fundingResult{}, fmt.Errorf("parse markPrice for %s: %w", p.Symbol, err)
+				}
+			}
+			values[p.Symbol] = domain.FundingInfo{
+				Rate:            value,
+				MarkPrice:       markPrice,
+				Interval:        8 * time.Hour,
+				NextFundingTime: time.UnixMilli(p.NextFundingTime),
+				UpdatedAt:       time.UnixMilli(p.Time),
+			}
+		}
+		return fundingResult{
+			funding: values,
+			headers: exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"),
+		}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return cloneFunding(result.funding), cloneMap(result.headers), nil
+}
+
+func (c *Client) BookTickers(ctx context.Context) ([]domain.VenueQuote, map[string]string, error) {
+	result, err := c.bookCache.Get(ctx, 2*time.Second, func(ctx context.Context) (bookResult, error) {
+		var resp []bookTickerResponse
+		meta, err := c.http.GetJSON(ctx, "/fapi/v1/ticker/bookTicker", nil, &resp)
+		if err != nil {
+			return bookResult{}, wrapErr(err)
+		}
+		quotes := make([]domain.VenueQuote, 0, len(resp))
+		for _, item := range resp {
+			bid, err := parseFloat(item.BidPrice)
+			if err != nil {
+				return bookResult{}, fmt.Errorf("parse bidPrice for %s: %w", item.Symbol, err)
+			}
+			ask, err := parseFloat(item.AskPrice)
+			if err != nil {
+				return bookResult{}, fmt.Errorf("parse askPrice for %s: %w", item.Symbol, err)
+			}
+			bidQty, err := parseFloat(item.BidQty)
+			if err != nil {
+				return bookResult{}, fmt.Errorf("parse bidQty for %s: %w", item.Symbol, err)
+			}
+			askQty, err := parseFloat(item.AskQty)
+			if err != nil {
+				return bookResult{}, fmt.Errorf("parse askQty for %s: %w", item.Symbol, err)
+			}
+			quotes = append(quotes, domain.VenueQuote{
+				Exchange:           domain.ExchangeBinance,
+				SourceSymbol:       item.Symbol,
+				BidPrice:           bid,
+				AskPrice:           ask,
+				BidQuantity:        bidQty,
+				AskQuantity:        askQty,
+				QuantityMultiplier: 1,
+				UpdatedAt:          time.UnixMilli(item.Time),
+			})
+		}
+		return bookResult{
+			quotes:  quotes,
+			headers: exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"),
+		}, nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return append([]domain.VenueQuote(nil), result.quotes...), cloneMap(result.headers), nil
+}
+
+func (c *Client) Quotes(ctx context.Context) ([]domain.VenueQuote, error) {
+	var contracts []domain.ContractSpec
+	var books []domain.VenueQuote
+	var funding map[string]domain.FundingInfo
+	var contractErr, bookErr, fundingErr error
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		contracts, _, contractErr = c.ExchangeInfo(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		books, _, bookErr = c.BookTickers(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		funding, _, fundingErr = c.Funding(ctx)
+	}()
+	wg.Wait()
+	if contractErr != nil {
+		return nil, contractErr
+	}
+	if bookErr != nil {
+		return nil, bookErr
+	}
+	if fundingErr != nil {
+		return nil, fundingErr
 	}
 
-	funding := make(map[string]float64, len(resp))
-	for _, p := range resp {
-		value, err := parseFloat(p.LastFundingRate)
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse lastFundingRate for %s: %w", p.Symbol, err)
-		}
-		funding[p.Symbol] = value
+	bySymbol := make(map[string]domain.ContractSpec, len(contracts))
+	for _, contract := range contracts {
+		bySymbol[contract.Symbol] = contract
 	}
-	return funding, exchange.HeaderSubset(meta.Headers, "X-MBX-USED-WEIGHT-1M"), nil
+	out := make([]domain.VenueQuote, 0, len(books))
+	for _, quote := range books {
+		contract, ok := bySymbol[quote.SourceSymbol]
+		if !ok {
+			continue
+		}
+		quote.Contract = contract
+		if info, ok := funding[quote.SourceSymbol]; ok {
+			rate := info.Rate
+			quote.FundingRate = &rate
+			quote.FundingInterval = info.Interval
+			quote.NextFundingTime = info.NextFundingTime
+			quote.MarkPrice = info.MarkPrice
+		}
+		out = append(out, quote)
+	}
+	return out, nil
 }
 
 func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int) ([]domain.Kline, map[string]string, error) {
@@ -154,7 +315,7 @@ func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 	if err != nil {
 		return domain.MarketSnapshot{}, err
 	}
-	funding, fundingHeaders, err := c.PremiumIndex(ctx)
+	funding, fundingHeaders, err := c.Funding(ctx)
 	if err != nil {
 		return domain.MarketSnapshot{}, err
 	}
@@ -169,7 +330,10 @@ func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 			tickers[i].TickSize = contract.TickSize
 			tickers[i].QuoteAsset = contract.QuoteAsset
 		}
-		tickers[i].FundingRate = funding[tickers[i].Symbol]
+		if info, ok := funding[tickers[i].Symbol]; ok {
+			tickers[i].FundingRate = info.Rate
+			tickers[i].NextFundingTime = info.NextFundingTime
+		}
 	}
 
 	headers := map[string]string{}
@@ -223,6 +387,38 @@ type ticker24hResponse struct {
 type premiumIndexResponse struct {
 	Symbol          string `json:"symbol"`
 	LastFundingRate string `json:"lastFundingRate"`
+	MarkPrice       string `json:"markPrice"`
+	NextFundingTime int64  `json:"nextFundingTime"`
+	Time            int64  `json:"time"`
+}
+
+type bookTickerResponse struct {
+	Symbol   string `json:"symbol"`
+	BidPrice string `json:"bidPrice"`
+	BidQty   string `json:"bidQty"`
+	AskPrice string `json:"askPrice"`
+	AskQty   string `json:"askQty"`
+	Time     int64  `json:"time"`
+}
+
+type contractsResult struct {
+	contracts []domain.ContractSpec
+	headers   map[string]string
+}
+
+type tickersResult struct {
+	tickers []domain.Ticker
+	headers map[string]string
+}
+
+type fundingResult struct {
+	funding map[string]domain.FundingInfo
+	headers map[string]string
+}
+
+type bookResult struct {
+	quotes  []domain.VenueQuote
+	headers map[string]string
 }
 
 func priceFilterTickSize(filters []map[string]any) float64 {
@@ -267,6 +463,22 @@ func numberToInt64(value any) (int64, error) {
 	default:
 		return 0, fmt.Errorf("unsupported integer type %T", value)
 	}
+}
+
+func cloneMap(src map[string]string) map[string]string {
+	out := make(map[string]string, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneFunding(src map[string]domain.FundingInfo) map[string]domain.FundingInfo {
+	out := make(map[string]domain.FundingInfo, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 var _ = http.MethodGet

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	arbitragemodel "scalp-assist/internal/arbitrage/model"
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/store"
 )
@@ -135,6 +136,52 @@ func TestSnapshotsHistoryStats(t *testing.T) {
 	})
 
 	for _, path := range []string{"/api/snapshots", "/api/history?symbol=BTCUSDT&days=7", "/api/stats?days=7"} {
+		resp := request(t, ts, http.MethodGet, path, nil, cookie)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestDashboardAndArbitrageEndpoints(t *testing.T) {
+	ts := newTestServer(t)
+	cookie := login(t, ts, "owner@example.com", "secret", http.StatusOK)
+	now := time.Now().UTC()
+	saveRows(t, ts.store, []domain.MetricsRow{
+		{Instrument: domain.Instrument{Base: "BTC", Multiplier: 1}, Rank: 1, Price: 100},
+	})
+	if _, err := ts.store.SaveArbitrageRun(context.Background(), arbitragemodel.Run{
+		ObservedAt: now,
+		ExchangeState: map[string]arbitragemodel.ExchangeState{
+			"binance": {OK: true, Quotes: 1, UpdatedAt: now},
+			"bybit":   {OK: true, Quotes: 1, UpdatedAt: now},
+		},
+		Instruments: 1,
+		Opportunities: []arbitragemodel.Opportunity{{
+			Instrument:     domain.InstrumentKey{Base: "BTC", Quote: "USDT", Multiplier: 1, Kind: "linear_perpetual"},
+			BuyExchange:    domain.ExchangeBinance,
+			SellExchange:   domain.ExchangeBybit,
+			BuySymbol:      "BTCUSDT",
+			SellSymbol:     "BTCUSDT",
+			BuyAsk:         100,
+			SellBid:        101,
+			GrossSpreadBps: 100,
+			NetSpreadBps:   90,
+			BuyQuoteAt:     now,
+			SellQuoteAt:    now,
+			FirstSeenAt:    now,
+			ObservedAt:     now,
+		}},
+	}); err != nil {
+		t.Fatalf("SaveArbitrageRun: %v", err)
+	}
+
+	for _, path := range []string{
+		"/api/dashboard/summary",
+		"/api/arbitrage/opportunities",
+		"/api/arbitrage/stats?days=7",
+		"/api/screener/top",
+	} {
 		resp := request(t, ts, http.MethodGet, path, nil, cookie)
 		if resp.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())

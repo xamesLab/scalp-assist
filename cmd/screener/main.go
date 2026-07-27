@@ -15,11 +15,13 @@ import (
 	"time"
 
 	"scalp-assist/internal/api"
+	"scalp-assist/internal/arbitrage"
 	"scalp-assist/internal/config"
 	"scalp-assist/internal/corr"
 	"scalp-assist/internal/domain"
 	"scalp-assist/internal/exchange/binance"
 	"scalp-assist/internal/exchange/bybit"
+	"scalp-assist/internal/exchange/okx"
 	"scalp-assist/internal/metrics"
 	"scalp-assist/internal/normalize"
 	"scalp-assist/internal/scheduler"
@@ -91,6 +93,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 	}
 	binanceClient := binance.New()
 	bybitClient := bybit.New()
+	okxClient := okx.New()
 	sched := scheduler.New(scheduler.Options{
 		Store:        db,
 		Defaults:     cfg.Settings,
@@ -103,6 +106,19 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		Logger:       logger,
 	})
 	sched.Start(serverCtx)
+	arbitrageService, err := arbitrage.New(arbitrage.Options{
+		Store:     db,
+		Clients:   []arbitrage.QuoteClient{binanceClient, bybitClient, okxClient},
+		Settings:  cfg.Arbitrage,
+		Interval:  cfg.Cycles.ArbitrageInterval,
+		Blacklist: cfg.Blacklist,
+		Overrides: cfg.NormalizationOverrides,
+		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+	arbitrageService.Start(serverCtx)
 	addr := cfg.DevHTTP
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -113,6 +129,7 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		JWTSecret:     secret,
 		SecureCookies: false,
 		Refresh:       sched.Refresh,
+		Arbitrage:     arbitrageService,
 	})
 	logger.Info("config loaded",
 		"path", configPath,
