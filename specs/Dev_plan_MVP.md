@@ -1,7 +1,7 @@
 # План разработки Scalp Assist
 
-**Версия:** 2.0
-**Дата:** 27.07.2026
+**Версия:** 2.1
+**Дата:** 29.07.2026
 
 Документ отражает фактическое состояние реализации. Исходный MVP скринера
 сохранён как этапы 0–10. Арбитраж добавлен отдельной фазой, но использует общую
@@ -11,10 +11,10 @@
 
 ```text
 exchange adapters + marketdata cache + normalize
-                 /                 \
-          screener contour     arbitrage contour
-                 \                 /
-              store + API + auth
+           /              |               \
+ screener contour   prop-screen       arbitrage contour
+           \              |               /
+                 store + API + auth
                       |
             dashboard + contour pages
 ```
@@ -151,9 +151,26 @@ BBO и fixtures.
 
 Проверка: API tests, `npm run build`, auth/live API smoke.
 
-## Фаза C: следующие улучшения
+## Фаза C: prop-screen
 
-### Этап 16 — WebSocket BBO
+### Этап 16 — Prop list market view
+
+**Статус:** готово.
+
+- Отдельный `/app/prop-screen` в верхнеуровневой навигации.
+- Общий кэшированный catalog + 24h ticker snapshot без funding/BBO.
+- Binance-first change/turnover и fallback на Bybit.
+- Exact multiplier и безопасный unique-base fallback.
+- Immediate + minute interval refresh, degraded mode и mutex.
+- Защищённые current/refresh API, поиск и сортировка таблицы.
+- Краткая карточка нового контура на общем Overview.
+- Отдельная русскоязычная Wiki по фильтрам, столбцам и корреляции с BTC.
+
+Проверка: unit matching/priority/degraded tests, API auth и frontend build.
+
+## Фаза D: следующие улучшения
+
+### Этап 17 — WebSocket BBO
 
 **Статус:** запланировано.
 
@@ -161,7 +178,7 @@ BBO и fixtures.
 общем in-memory hub и оставить REST как bootstrap/fallback. Нужны reconnect,
 heartbeat, sequence validation и метрика возраста данных.
 
-### Этап 17 — Глубина и slippage
+### Этап 18 — Глубина и slippage
 
 **Статус:** запланировано.
 
@@ -169,19 +186,35 @@ heartbeat, sequence validation и метрика возраста данных.
 исполняемую ёмкость для заданных размеров позиции. Не скачивать полную глубину
 для всего рынка.
 
-### Этап 18 — Аналитика истории
+### Этап 19 — Аналитика истории
 
 **Статус:** запланировано.
 
 График spread, длительность непрерывной возможности, медиана/квантили,
 доступность маршрута и экспорт CSV.
 
-### Этап 19 — Настройки и уведомления
+### Этап 20 — Настройки и уведомления
 
 **Статус:** запланировано.
 
 UI для fee assumptions и порогов арбитража, затем уведомления. Автоматическое
 исполнение сделок остаётся вне скоупа.
+
+## Фаза E: сетка свечных графиков
+
+### Этап — Charts
+
+**Статус:** готово.
+
+- Отдельный маршрут `/app/charts`.
+- Два столбца, BTC/ETH по умолчанию, заглушка добавления, лимит 10.
+- Свечи `5m/1h`, Binance-first и Bybit fallback.
+- Один multiplexed WebSocket и общий upstream для совпадающих подписок.
+- Раскладка и таймфреймы в `scalpAssist.chartGrid.v1`.
+- `Set charts` на Screener и Prop screen.
+- Межвкладочная синхронизация через `storage` и ручной `Refresh layout`.
+
+Проверка: backend unit/API WebSocket tests, localStorage tests, frontend build.
 
 ## Обязательные проверки релиза
 

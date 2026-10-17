@@ -112,6 +112,11 @@ func TestStreamKlinesParsesUpdate(t *testing.T) {
 		if err := wsjson.Read(r.Context(), conn, &subscription); err != nil {
 			return
 		}
+		params, _ := subscription["params"].([]any)
+		if len(params) != 1 || params[0] != "btcusdt@kline_1h" {
+			t.Errorf("unexpected Binance subscription: %+v", subscription)
+			return
+		}
 		_ = wsjson.Write(r.Context(), conn, map[string]any{
 			"e": "kline",
 			"k": map[string]any{"t": int64(1700000000000), "s": "BTCUSDT", "c": "101.5", "x": false},
@@ -125,7 +130,7 @@ func TestStreamKlinesParsesUpdate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out := make(chan domain.Kline, 1)
-	go func() { _ = client.StreamKlines(ctx, "BTCUSDT", "1m", out) }()
+	go func() { _ = client.StreamKlines(ctx, "BTCUSDT", "1h", out) }()
 
 	select {
 	case point := <-out:

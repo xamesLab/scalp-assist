@@ -34,6 +34,9 @@ type binanceKlineEvent struct {
 	Kline struct {
 		OpenTime int64  `json:"t"`
 		Symbol   string `json:"s"`
+		Open     string `json:"o"`
+		High     string `json:"h"`
+		Low      string `json:"l"`
 		Close    string `json:"c"`
 		Closed   bool   `json:"x"`
 	} `json:"k"`
@@ -309,12 +312,27 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse open time for %s: %w", symbol, err)
 		}
+		openPrice, err := anyToFloat(row[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse open for %s: %w", symbol, err)
+		}
+		highPrice, err := anyToFloat(row[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse high for %s: %w", symbol, err)
+		}
+		lowPrice, err := anyToFloat(row[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse low for %s: %w", symbol, err)
+		}
 		closePrice, err := anyToFloat(row[4])
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse close for %s: %w", symbol, err)
 		}
 		klines = append(klines, domain.Kline{
 			OpenTime: time.UnixMilli(openMS),
+			Open:     openPrice,
+			High:     highPrice,
+			Low:      lowPrice,
 			Close:    closePrice,
 		})
 	}
@@ -322,7 +340,7 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 }
 
 func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out chan<- domain.Kline) error {
-	if interval != "1m" && interval != "5m" {
+	if interval != "1m" && interval != "5m" && interval != "1h" {
 		return fmt.Errorf("unsupported Binance kline interval %q", interval)
 	}
 	conn, _, err := websocket.Dial(ctx, c.wsURL, nil)
@@ -352,8 +370,27 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 		if err != nil {
 			return fmt.Errorf("parse Binance websocket close for %s: %w", symbol, err)
 		}
+		openPrice, highPrice, lowPrice := closePrice, closePrice, closePrice
+		if event.Kline.Open != "" {
+			if openPrice, err = parseFloat(event.Kline.Open); err != nil {
+				return fmt.Errorf("parse Binance websocket open for %s: %w", symbol, err)
+			}
+		}
+		if event.Kline.High != "" {
+			if highPrice, err = parseFloat(event.Kline.High); err != nil {
+				return fmt.Errorf("parse Binance websocket high for %s: %w", symbol, err)
+			}
+		}
+		if event.Kline.Low != "" {
+			if lowPrice, err = parseFloat(event.Kline.Low); err != nil {
+				return fmt.Errorf("parse Binance websocket low for %s: %w", symbol, err)
+			}
+		}
 		point := domain.Kline{
 			OpenTime: time.UnixMilli(event.Kline.OpenTime),
+			Open:     openPrice,
+			High:     highPrice,
+			Low:      lowPrice,
 			Close:    closePrice,
 			Closed:   event.Kline.Closed,
 		}
@@ -365,16 +402,12 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 	}
 }
 
-func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
+func (c *Client) MarketSnapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 	contracts, contractHeaders, err := c.ExchangeInfo(ctx)
 	if err != nil {
 		return domain.MarketSnapshot{}, err
 	}
 	tickers, tickerHeaders, err := c.Tickers24h(ctx)
-	if err != nil {
-		return domain.MarketSnapshot{}, err
-	}
-	funding, fundingHeaders, err := c.Funding(ctx)
 	if err != nil {
 		return domain.MarketSnapshot{}, err
 	}
@@ -389,16 +422,11 @@ func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 			tickers[i].TickSize = contract.TickSize
 			tickers[i].QuoteAsset = contract.QuoteAsset
 		}
-		if info, ok := funding[tickers[i].Symbol]; ok {
-			tickers[i].FundingRate = info.Rate
-			tickers[i].NextFundingTime = info.NextFundingTime
-		}
 	}
 
 	headers := map[string]string{}
 	merge(headers, contractHeaders)
 	merge(headers, tickerHeaders)
-	merge(headers, fundingHeaders)
 	return domain.MarketSnapshot{
 		Exchange:   domain.ExchangeBinance,
 		Contracts:  contracts,
@@ -406,6 +434,26 @@ func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 		RateLimits: headers,
 		FetchedAt:  time.Now().UTC(),
 	}, nil
+}
+
+func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
+	snapshot, err := c.MarketSnapshot(ctx)
+	if err != nil {
+		return domain.MarketSnapshot{}, err
+	}
+	funding, fundingHeaders, err := c.Funding(ctx)
+	if err != nil {
+		return domain.MarketSnapshot{}, err
+	}
+	for i := range snapshot.Tickers {
+		if info, ok := funding[snapshot.Tickers[i].Symbol]; ok {
+			snapshot.Tickers[i].FundingRate = info.Rate
+			snapshot.Tickers[i].FundingKnown = true
+			snapshot.Tickers[i].NextFundingTime = info.NextFundingTime
+		}
+	}
+	merge(snapshot.RateLimits, fundingHeaders)
+	return snapshot, nil
 }
 
 func merge(dst, src map[string]string) {

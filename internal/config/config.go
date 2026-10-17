@@ -29,9 +29,10 @@ type Config struct {
 }
 
 type CycleConfig struct {
-	FastInterval      time.Duration `yaml:"fast_interval"`
-	SlowInterval      time.Duration `yaml:"slow_interval"`
-	ArbitrageInterval time.Duration `yaml:"arbitrage_interval"`
+	FastInterval       time.Duration `yaml:"fast_interval"`
+	SlowInterval       time.Duration `yaml:"slow_interval"`
+	ArbitrageInterval  time.Duration `yaml:"arbitrage_interval"`
+	PropScreenInterval time.Duration `yaml:"prop_screen_interval"`
 }
 
 type AuthConfig struct {
@@ -62,6 +63,9 @@ func Load(path string) (Config, error) {
 func (cfg *Config) applyDefaults() {
 	if cfg.Cycles.ArbitrageInterval <= 0 {
 		cfg.Cycles.ArbitrageInterval = 10 * time.Second
+	}
+	if cfg.Cycles.PropScreenInterval <= 0 {
+		cfg.Cycles.PropScreenInterval = time.Minute
 	}
 	arbitrageDefaults := DefaultArbitrageSettings()
 	if cfg.Arbitrage.TopN == 0 {
@@ -108,6 +112,9 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Cycles.ArbitrageInterval <= 0 {
 		return errors.New("cycles.arbitrage_interval must be positive")
+	}
+	if cfg.Cycles.PropScreenInterval <= 0 {
+		return errors.New("cycles.prop_screen_interval must be positive")
 	}
 	if err := ValidateSettings(cfg.Settings); err != nil {
 		return err

@@ -222,6 +222,18 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse open time for %s: %w", symbol, err)
 		}
+		openPrice, err := parseFloat(row[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse open for %s: %w", symbol, err)
+		}
+		highPrice, err := parseFloat(row[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse high for %s: %w", symbol, err)
+		}
+		lowPrice, err := parseFloat(row[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse low for %s: %w", symbol, err)
+		}
 		closePrice, err := parseFloat(row[4])
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse close for %s: %w", symbol, err)
@@ -229,6 +241,9 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		closed := len(row) < 9 || row[8] == "1"
 		klines = append(klines, domain.Kline{
 			OpenTime: time.UnixMilli(openMS),
+			Open:     openPrice,
+			High:     highPrice,
+			Low:      lowPrice,
 			Close:    closePrice,
 			Closed:   closed,
 		})
@@ -304,12 +319,27 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 			if err != nil {
 				return fmt.Errorf("parse OKX websocket open time for %s: %w", symbol, err)
 			}
+			openPrice, err := parseFloat(row[1])
+			if err != nil {
+				return fmt.Errorf("parse OKX websocket open for %s: %w", symbol, err)
+			}
+			highPrice, err := parseFloat(row[2])
+			if err != nil {
+				return fmt.Errorf("parse OKX websocket high for %s: %w", symbol, err)
+			}
+			lowPrice, err := parseFloat(row[3])
+			if err != nil {
+				return fmt.Errorf("parse OKX websocket low for %s: %w", symbol, err)
+			}
 			closePrice, err := parseFloat(row[4])
 			if err != nil {
 				return fmt.Errorf("parse OKX websocket close for %s: %w", symbol, err)
 			}
 			point := domain.Kline{
 				OpenTime: time.UnixMilli(openMS),
+				Open:     openPrice,
+				High:     highPrice,
+				Low:      lowPrice,
 				Close:    closePrice,
 				Closed:   len(row) >= 9 && row[8] == "1",
 			}

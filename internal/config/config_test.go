@@ -24,6 +24,9 @@ func TestLoadExampleConfig(t *testing.T) {
 	if cfg.Arbitrage.MakerFeesBps["binance"] != 2 {
 		t.Fatalf("Binance maker fee = %v, want 2", cfg.Arbitrage.MakerFeesBps["binance"])
 	}
+	if cfg.Cycles.PropScreenInterval != time.Minute {
+		t.Fatalf("PropScreenInterval = %v, want 1m", cfg.Cycles.PropScreenInterval)
+	}
 }
 
 func TestLoadAppliesArbitrageDefaultsToLegacyConfig(t *testing.T) {
@@ -54,7 +57,8 @@ settings:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Cycles.ArbitrageInterval != 10*time.Second || cfg.Arbitrage.TopN != 30 ||
+	if cfg.Cycles.ArbitrageInterval != 10*time.Second || cfg.Cycles.PropScreenInterval != time.Minute ||
+		cfg.Arbitrage.TopN != 30 ||
 		cfg.Arbitrage.MakerFeesBps["okx"] != 2 {
 		t.Fatalf("defaults not applied: %+v", cfg)
 	}

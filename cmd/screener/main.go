@@ -16,6 +16,7 @@ import (
 
 	"scalp-assist/internal/api"
 	"scalp-assist/internal/arbitrage"
+	"scalp-assist/internal/charts"
 	"scalp-assist/internal/config"
 	"scalp-assist/internal/corr"
 	"scalp-assist/internal/domain"
@@ -24,6 +25,7 @@ import (
 	"scalp-assist/internal/exchange/okx"
 	"scalp-assist/internal/metrics"
 	"scalp-assist/internal/normalize"
+	"scalp-assist/internal/propscreen"
 	"scalp-assist/internal/scheduler"
 	"scalp-assist/internal/scoring"
 	"scalp-assist/internal/store"
@@ -119,6 +121,30 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		return err
 	}
 	arbitrageService.Start(serverCtx)
+	propScreenService, err := propscreen.New(propscreen.Options{
+		Store:        db,
+		Clients:      []propscreen.MarketClient{binanceClient, bybitClient},
+		Interval:     cfg.Cycles.PropScreenInterval,
+		CorrInterval: cfg.Cycles.SlowInterval,
+		CorrFetchers: corr.Fetchers{Binance: binanceClient, Bybit: bybitClient},
+		Blacklist:    cfg.Blacklist,
+		Overrides:    cfg.NormalizationOverrides,
+		Logger:       logger,
+	})
+	if err != nil {
+		return err
+	}
+	propScreenService.Start(serverCtx)
+	chartService, err := charts.New(charts.Options{
+		Clients:   []charts.Client{binanceClient, bybitClient},
+		Blacklist: cfg.Blacklist,
+		Overrides: cfg.NormalizationOverrides,
+		Logger:    logger,
+	})
+	if err != nil {
+		return err
+	}
+	chartService.Start(serverCtx)
 	addr := cfg.DevHTTP
 	if addr == "" {
 		addr = "127.0.0.1:8080"
@@ -130,6 +156,8 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		SecureCookies: false,
 		Refresh:       sched.Refresh,
 		Arbitrage:     arbitrageService,
+		PropScreen:    propScreenService,
+		Charts:        chartService,
 	})
 	logger.Info("config loaded",
 		"path", configPath,

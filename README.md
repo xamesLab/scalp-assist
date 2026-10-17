@@ -1,15 +1,19 @@
 # Scalp Assist
 
-Self-hosted information service for futures trading research. It has two private
+Self-hosted information service for futures trading research. It has four private
 contours behind one account:
 
 - **Screener** ranks Binance and Bybit USDT/USDC perpetuals using volume,
   volatility, market-relative movement, BTC correlation and a prop-company list.
+- **Prop screen** shows every prop-list coin currently available on Binance or
+  Bybit with its 24-hour change and Binance-first turnover.
 - **Arbitrage** monitors cross-exchange USDT perpetual spreads between Binance,
   Bybit and OKX. It shows statistics only and never sends orders.
+- **Charts** displays a persistent two-column grid of 5-minute and 1-hour
+  candlestick charts. Binance is preferred and Bybit is used as a fallback.
 
 The public `/` route is a landing page. After login, `/app` opens a shared
-dashboard with links and summary data for both contours.
+dashboard with links and summary data for all contours.
 
 ## Local development
 
@@ -46,7 +50,7 @@ npm run dev
 ```bash
 go test ./...
 go build ./cmd/screener
-cd web && npm run build
+cd web && npm test && npm run build
 ```
 
 Live exchange checks on the owner's Windows machine must run through
@@ -59,7 +63,8 @@ Public: `/`, `/auth`.
 
 Private: `/app`, `/app/screener`, `/app/screener/history`,
 `/app/screener/settings`, `/app/screener/wiki`, `/app/arbitrage`,
-`/app/arbitrage/settings`, `/app/arbitrage/wiki`.
+`/app/arbitrage/settings`, `/app/arbitrage/wiki`, `/app/prop-screen`,
+`/app/prop-screen/wiki`, `/app/charts`.
 
 Legacy screener routes under `/app/top`, `/app/history` and `/app/settings`
 remain available for compatibility.
@@ -71,4 +76,6 @@ build outputs are ignored by Git. Deployment is described in
 Detailed implementation guides for coding agents:
 
 - `specs/Screener_contour_agent_guide.md`
+- `specs/Prop_screen_contour_agent_guide.md`
 - `specs/Arbitrage_contour_agent_guide.md`
+- `specs/Charts_contour_agent_guide.md`

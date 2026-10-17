@@ -18,7 +18,9 @@ import (
 
 	"scalp-assist/internal/arbitrage"
 	arbitragemodel "scalp-assist/internal/arbitrage/model"
+	marketcharts "scalp-assist/internal/charts"
 	"scalp-assist/internal/domain"
+	"scalp-assist/internal/propscreen"
 	"scalp-assist/internal/store"
 )
 
@@ -132,6 +134,84 @@ func TestPropListGetPut(t *testing.T) {
 	decode(t, resp, &got)
 	if len(got) != 1 || got[0].Instrument.Base != "BTC" || got[0].Note != "main" {
 		t.Fatalf("props = %+v", got)
+	}
+}
+
+func TestPropScreenEndpoints(t *testing.T) {
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "prop-screen.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.BootstrapUser(context.Background(), "owner@example.com", "secret"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if err := db.ReplacePropList(context.Background(), []store.PropInstrument{{
+		Instrument: domain.Instrument{Base: "BTC", Multiplier: 1},
+	}}); err != nil {
+		t.Fatalf("ReplacePropList: %v", err)
+	}
+	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+	propService, err := propscreen.New(propscreen.Options{
+		Store: db,
+		Clients: []propscreen.MarketClient{apiPropClient{
+			exchange: domain.ExchangeBinance,
+			snapshot: domain.MarketSnapshot{
+				Exchange:  domain.ExchangeBinance,
+				FetchedAt: now,
+				Contracts: []domain.ContractSpec{{
+					Exchange: domain.ExchangeBinance, Symbol: "BTCUSDT", BaseAsset: "BTC",
+					QuoteAsset: "USDT", Status: "TRADING", ContractType: "PERPETUAL",
+				}},
+				Tickers: []domain.Ticker{{
+					Exchange: domain.ExchangeBinance, Symbol: "BTCUSDT",
+					ChangePct24h: 4.5, TurnoverUSD: 123_000_000, UpdatedAt: now,
+				}},
+			},
+		}},
+		Interval: time.Minute,
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("propscreen.New: %v", err)
+	}
+	srv := New(Options{
+		Store: db, Defaults: testSettings(),
+		JWTSecret:  []byte("01234567890123456789012345678901"),
+		PropScreen: propService,
+	})
+	ts := testServer{handler: srv.Handler(), store: db}
+	cookie := login(t, ts, "owner@example.com", "secret", http.StatusOK)
+
+	resp := request(t, ts, http.MethodGet, "/api/prop-screen", nil, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET prop-screen status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var run propscreen.Run
+	decode(t, resp, &run)
+	if run.Listed != 1 || len(run.Rows) != 1 || run.Rows[0].SourceExchange != domain.ExchangeBinance {
+		t.Fatalf("run = %+v", run)
+	}
+
+	resp = request(t, ts, http.MethodGet, "/api/dashboard/summary", nil, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("dashboard status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var summary struct {
+		PropScreen struct {
+			PropTotal      int `json:"prop_total"`
+			Listed         int `json:"listed"`
+			BinanceSources int `json:"binance_sources"`
+		} `json:"prop_screen"`
+	}
+	decode(t, resp, &summary)
+	if summary.PropScreen.PropTotal != 1 || summary.PropScreen.Listed != 1 || summary.PropScreen.BinanceSources != 1 {
+		t.Fatalf("prop-screen summary = %+v", summary.PropScreen)
+	}
+
+	resp = request(t, ts, http.MethodPost, "/api/prop-screen/refresh", nil, cookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("POST prop-screen refresh status=%d body=%s", resp.Code, resp.Body.String())
 	}
 }
 
@@ -328,11 +408,123 @@ func TestArbitrageChartWebSocketRequiresAuthAndStreamsSnapshot(t *testing.T) {
 	}
 }
 
+func TestMarketChartWebSocketMultiplexesSnapshotAndBar(t *testing.T) {
+	db, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "market-charts.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.BootstrapUser(context.Background(), "owner@example.com", "secret"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Hour)
+	chartService, err := marketcharts.New(marketcharts.Options{
+		Clients: []marketcharts.Client{
+			apiChartClient{exchange: domain.ExchangeBinance, symbol: "BTCUSDT", price: 100, now: now},
+		},
+	})
+	if err != nil {
+		t.Fatalf("charts.New: %v", err)
+	}
+	if err := chartService.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	srv := New(Options{
+		Store: db, Defaults: testSettings(),
+		JWTSecret: []byte("01234567890123456789012345678901"),
+		Charts:    chartService,
+	})
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	loginBody := bytes.NewBufferString(`{"email":"owner@example.com","password":"secret"}`)
+	loginResponse, err := client.Post(httpServer.URL+"/api/auth/login", "application/json", loginBody)
+	if err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	_ = loginResponse.Body.Close()
+	if loginResponse.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d", loginResponse.StatusCode)
+	}
+
+	instrumentsResponse, err := client.Get(httpServer.URL + "/api/charts/instruments")
+	if err != nil {
+		t.Fatalf("instruments request: %v", err)
+	}
+	var instruments []marketcharts.Instrument
+	if err := json.NewDecoder(instrumentsResponse.Body).Decode(&instruments); err != nil {
+		_ = instrumentsResponse.Body.Close()
+		t.Fatalf("decode instruments: %v", err)
+	}
+	_ = instrumentsResponse.Body.Close()
+	if instrumentsResponse.StatusCode != http.StatusOK || len(instruments) != 1 || instruments[0].ID != "BTC:1" {
+		t.Fatalf("unexpected instruments: status=%d body=%+v", instrumentsResponse.StatusCode, instruments)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	streamURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/api/charts/stream"
+	conn, _, err := websocket.Dial(ctx, streamURL, &websocket.DialOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	defer conn.CloseNow()
+	if err := wsjson.Write(ctx, conn, chartCommand{
+		Type: "subscribe", SlotID: "slot-btc", InstrumentID: "BTC:1", Interval: "1h",
+	}); err != nil {
+		t.Fatalf("write subscribe: %v", err)
+	}
+
+	var snapshot struct {
+		Type    string                `json:"type"`
+		SlotID  string                `json:"slot_id"`
+		Candles []marketcharts.Candle `json:"candles"`
+	}
+	for snapshot.Type != "snapshot" {
+		if err := wsjson.Read(ctx, conn, &snapshot); err != nil {
+			t.Fatalf("read snapshot: %v", err)
+		}
+	}
+	if snapshot.SlotID != "slot-btc" || len(snapshot.Candles) != 1 || snapshot.Candles[0].Close != 100 {
+		t.Fatalf("unexpected snapshot: %+v", snapshot)
+	}
+
+	var bar struct {
+		Type   string               `json:"type"`
+		SlotID string               `json:"slot_id"`
+		Candle *marketcharts.Candle `json:"candle"`
+	}
+	for bar.Type != "bar" {
+		if err := wsjson.Read(ctx, conn, &bar); err != nil {
+			t.Fatalf("read bar: %v", err)
+		}
+	}
+	if bar.SlotID != "slot-btc" || bar.Candle == nil || bar.Candle.Close != 100.5 {
+		t.Fatalf("unexpected bar: %+v", bar)
+	}
+}
+
 type apiChartClient struct {
 	exchange domain.Exchange
 	symbol   string
 	price    float64
 	now      time.Time
+}
+
+type apiPropClient struct {
+	exchange domain.Exchange
+	snapshot domain.MarketSnapshot
+}
+
+func (f apiPropClient) Exchange() domain.Exchange {
+	return f.exchange
+}
+
+func (f apiPropClient) MarketSnapshot(context.Context) (domain.MarketSnapshot, error) {
+	return f.snapshot, nil
 }
 
 func (f apiChartClient) Exchange() domain.Exchange {

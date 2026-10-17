@@ -30,6 +30,9 @@ type bybitKlineEvent struct {
 	Topic string `json:"topic"`
 	Data  []struct {
 		Start   int64  `json:"start"`
+		Open    string `json:"open"`
+		High    string `json:"high"`
+		Low     string `json:"low"`
 		Close   string `json:"close"`
 		Confirm bool   `json:"confirm"`
 	} `json:"data"`
@@ -255,12 +258,27 @@ func (c *Client) Klines(ctx context.Context, symbol, interval string, limit int)
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse open time for %s: %w", symbol, err)
 		}
+		openPrice, err := parseFloat(row[1])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse open for %s: %w", symbol, err)
+		}
+		highPrice, err := parseFloat(row[2])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse high for %s: %w", symbol, err)
+		}
+		lowPrice, err := parseFloat(row[3])
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse low for %s: %w", symbol, err)
+		}
 		closePrice, err := parseFloat(row[4])
 		if err != nil {
 			return nil, nil, fmt.Errorf("parse close for %s: %w", symbol, err)
 		}
 		klines = append(klines, domain.Kline{
 			OpenTime: time.UnixMilli(openMS),
+			Open:     openPrice,
+			High:     highPrice,
+			Low:      lowPrice,
 			Close:    closePrice,
 		})
 	}
@@ -277,6 +295,8 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 		wireInterval = "1"
 	case "5m":
 		wireInterval = "5"
+	case "1h":
+		wireInterval = "60"
 	default:
 		return fmt.Errorf("unsupported Bybit kline interval %q", interval)
 	}
@@ -323,8 +343,27 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 			if err != nil {
 				return fmt.Errorf("parse Bybit websocket close for %s: %w", symbol, err)
 			}
+			openPrice, highPrice, lowPrice := closePrice, closePrice, closePrice
+			if item.Open != "" {
+				if openPrice, err = parseFloat(item.Open); err != nil {
+					return fmt.Errorf("parse Bybit websocket open for %s: %w", symbol, err)
+				}
+			}
+			if item.High != "" {
+				if highPrice, err = parseFloat(item.High); err != nil {
+					return fmt.Errorf("parse Bybit websocket high for %s: %w", symbol, err)
+				}
+			}
+			if item.Low != "" {
+				if lowPrice, err = parseFloat(item.Low); err != nil {
+					return fmt.Errorf("parse Bybit websocket low for %s: %w", symbol, err)
+				}
+			}
 			point := domain.Kline{
 				OpenTime: time.UnixMilli(item.Start),
+				Open:     openPrice,
+				High:     highPrice,
+				Low:      lowPrice,
 				Close:    closePrice,
 				Closed:   item.Confirm,
 			}
@@ -337,7 +376,7 @@ func (c *Client) StreamKlines(ctx context.Context, symbol, interval string, out 
 	}
 }
 
-func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
+func (c *Client) MarketSnapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 	contracts, contractHeaders, err := c.InstrumentsInfo(ctx)
 	if err != nil {
 		return domain.MarketSnapshot{}, err
@@ -369,6 +408,10 @@ func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
 		RateLimits: headers,
 		FetchedAt:  time.Now().UTC(),
 	}, nil
+}
+
+func (c *Client) Snapshot(ctx context.Context) (domain.MarketSnapshot, error) {
+	return c.MarketSnapshot(ctx)
 }
 
 func checkRetCode(code int, msg string) error {

@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ColorType, CrosshairMode, LineSeries, createChart } from 'lightweight-charts'
+import ChartsPage from './ChartsPage'
+import {
+  addInstrumentChart,
+  chartGridHasInstrument,
+  readChartGrid,
+  removeInstrumentCharts,
+  subscribeChartGrid,
+} from './chartGridStorage'
 import {
   ArrowLeftRight,
   ArrowRight,
@@ -8,6 +16,7 @@ import {
   Home,
   LogIn,
   LogOut,
+  ListFilter,
   Moon,
   PanelTopClose,
   PanelTopOpen,
@@ -59,6 +68,8 @@ const api = {
   refreshArbitrage: () => api.request('/api/arbitrage/refresh', { method: 'POST' }),
   arbitrageFees: () => api.request('/api/arbitrage/fees'),
   arbitrageChartInstruments: () => api.request('/api/arbitrage/charts/instruments'),
+  propScreen: () => api.request('/api/prop-screen'),
+  refreshPropScreen: () => api.request('/api/prop-screen/refresh', { method: 'POST' }),
 }
 
 function App() {
@@ -204,8 +215,17 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
   const route = new URL(path, window.location.origin)
   const pathname = route.pathname
   const chartInstrumentID = route.searchParams.get('instrument') || ''
-  const contour = pathname === '/app' ? 'dashboard' : pathname.startsWith('/app/arbitrage') ? 'arbitrage' : 'screener'
+  const contour = pathname === '/app'
+    ? 'dashboard'
+    : pathname.startsWith('/app/charts')
+      ? 'charts'
+    : pathname.startsWith('/app/arbitrage')
+      ? 'arbitrage'
+      : pathname.startsWith('/app/prop-screen')
+        ? 'prop-screen'
+        : 'screener'
   const screenerView = pathname.endsWith('/history') ? 'history' : pathname.endsWith('/settings') ? 'settings' : pathname.endsWith('/wiki') ? 'wiki' : 'top'
+  const propScreenView = pathname.endsWith('/wiki') ? 'wiki' : 'list'
   const arbitrageView = pathname.endsWith('/charts') ? 'charts' : pathname.endsWith('/info') ? 'info' : pathname.endsWith('/settings') ? 'settings' : pathname.endsWith('/wiki') ? 'wiki' : 'list'
   const logout = async () => {
     try { await api.logout() } catch {}
@@ -220,6 +240,8 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
           <div className="fx gap4 mainnav">
             <button className={`tab ${contour === 'dashboard' ? 'on' : ''}`} onClick={() => nav('/app')}><Home size={15} />Overview</button>
             <button className={`tab ${contour === 'screener' ? 'on' : ''}`} onClick={() => nav('/app/screener')}><BarChart3 size={15} />Screener</button>
+            <button className={`tab ${contour === 'prop-screen' ? 'on' : ''}`} onClick={() => nav('/app/prop-screen')}><ListFilter size={15} />Prop screen</button>
+            <button className={`tab ${contour === 'charts' ? 'on' : ''}`} onClick={() => nav('/app/charts')}><BarChart3 size={15} />Charts</button>
             <button className={`tab ${contour === 'arbitrage' ? 'on' : ''}`} onClick={() => nav('/app/arbitrage')}><ArrowLeftRight size={15} />Arbitrage</button>
           </div>
         </div>
@@ -237,6 +259,12 @@ function PrivateApp({ path, nav, user, setUser, onUnauthorized, theme, setTheme 
         {screenerView === 'settings' && <SettingsPage onUnauthorized={onUnauthorized} />}
         {screenerView === 'wiki' && <ScreenerWikiPage />}
       </>}
+      {contour === 'prop-screen' && <>
+        <PropScreenNav current={propScreenView} nav={nav} />
+        {propScreenView === 'list' && <PropScreenPage onUnauthorized={onUnauthorized} />}
+        {propScreenView === 'wiki' && <PropScreenWikiPage />}
+      </>}
+      {contour === 'charts' && <ChartsPage onUnauthorized={onUnauthorized} theme={theme} />}
       {contour === 'arbitrage' && <>
         <ArbitrageNav current={arbitrageView} nav={nav} />
         {arbitrageView === 'list' && <ArbitragePage onUnauthorized={onUnauthorized} nav={nav} />}
@@ -274,6 +302,18 @@ function ArbitrageNav({ current, nav }) {
       { id: 'info', label: 'Info', path: '/app/arbitrage/info' },
       { id: 'settings', label: 'Settings', path: '/app/arbitrage/settings' },
       { id: 'wiki', label: 'Wiki', path: '/app/arbitrage/wiki' },
+    ]}
+  />
+}
+
+function PropScreenNav({ current, nav }) {
+  return <ContourTabs
+    label="Prop screen sections"
+    current={current}
+    nav={nav}
+    tabs={[
+      { id: 'list', label: 'List', path: '/app/prop-screen' },
+      { id: 'wiki', label: 'Wiki', path: '/app/prop-screen/wiki' },
     ]}
   />
 }
@@ -711,7 +751,9 @@ function DashboardPage({ nav, onUnauthorized }) {
 
   const screener = summary?.screener || {}
   const arb = summary?.arbitrage || {}
+  const prop = summary?.prop_screen || {}
   const exchanges = Object.entries(arb.exchanges || {})
+  const propExchanges = Object.entries(prop.exchanges || {})
   const scoreRows = screener.top_score || []
   const scoreMore = Math.max(0, Number(screener.rows || 0) - scoreRows.length)
   const positiveRows = arb.positive_opportunities || []
@@ -721,7 +763,7 @@ function DashboardPage({ nav, onUnauthorized }) {
       <div className="page-heading">
         <div><div className="page-kicker mono">Workspace</div><h1>Overview</h1></div>
         <div className="fx ac gap12">
-          <span className="updated mono">{latestTime(screener.updated_at, arb.updated_at)}</span>
+          <span className="updated mono">{latestTime(screener.updated_at, prop.updated_at, arb.updated_at)}</span>
           <button className="btn" type="button" disabled={loading} onClick={load}>
             {loading && <span className="spinner" />}<RefreshCw size={15} />Refresh cards
           </button>
@@ -749,6 +791,24 @@ function DashboardPage({ nav, onUnauthorized }) {
           <button className="btn contour-open" onClick={() => nav('/app/screener')}>Open screener <ArrowRight size={16} /></button>
         </section>
         <section className="contour-panel">
+          <div className="contour-head"><ListFilter size={20} /><div><div className="sec-h">Prop screen</div><div className="dim fs13 mono">{formatUpdated(prop.updated_at)}</div></div></div>
+          <div className="contour-value">{prop.listed ?? 0}</div>
+          <div className="dim">of {prop.prop_total ?? 0} prop-list coins available</div>
+          <div className="exchange-states">{propExchanges.map(([name, state]) => <span className={`exchange-state ${state.ok ? 'ok' : 'bad'}`} key={name}><span className="status-dot" />{exchangeLabel(name)}</span>)}</div>
+          <div className="overview-arb-list">
+            <div className="overview-arb-row overview-score-row overview-arb-header">
+              <span>Metric source</span><span>Coins</span>
+            </div>
+            <div className="overview-arb-row overview-score-row">
+              <span>Binance</span><span className="mono fw7">{prop.binance_sources ?? 0}</span>
+            </div>
+            <div className="overview-arb-row overview-score-row">
+              <span>Bybit fallback</span><span className="mono fw7">{prop.bybit_fallbacks ?? 0}</span>
+            </div>
+          </div>
+          <button className="btn contour-open" onClick={() => nav('/app/prop-screen')}>Open prop screen <ArrowRight size={16} /></button>
+        </section>
+        <section className="contour-panel">
           <div className="contour-head"><ArrowLeftRight size={20} /><div><div className="sec-h">Arbitrage</div><div className="dim fs13 mono">{formatUpdated(arb.updated_at)}</div></div></div>
           <div className="contour-value">{arb.opportunities ?? 0}</div>
           <div className="dim">{arb.instruments ?? 0} common instruments</div>
@@ -771,6 +831,307 @@ function DashboardPage({ nav, onUnauthorized }) {
           <button className="btn contour-open" onClick={() => nav('/app/arbitrage')}>Open arbitrage <ArrowRight size={16} /></button>
         </section>
       </div>
+    </div>
+  )
+}
+
+function PropScreenPage({ onUnauthorized }) {
+  const [run, setRun] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState({ key: 'coin', direction: 'asc' })
+  const [minChange, setMinChange] = useState('')
+  const [minTurnover, setMinTurnover] = useState('')
+  const [selectingCharts, setSelectingCharts] = useState(false)
+  const [selectedCharts, setSelectedCharts] = useState(() => readChartGrid())
+
+  const load = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setRun(await api.propScreen())
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { load() }, [])
+  useEffect(() => subscribeChartGrid(setSelectedCharts), [])
+
+  const refresh = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setRun(await api.refreshPropScreen())
+    } catch (err) {
+      if (err.status === 401) onUnauthorized()
+      else setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const changeSort = (key) => {
+    setSort((current) => ({
+      key,
+      direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc',
+    }))
+  }
+  const parsedMinChange = Number(minChange)
+  const parsedMinTurnover = Number(minTurnover)
+  const minChangeValue = minChange === '' || !Number.isFinite(parsedMinChange) ? null : parsedMinChange
+  const minTurnoverValue = minTurnover === '' || !Number.isFinite(parsedMinTurnover) ? null : parsedMinTurnover
+  const rows = [...(run?.rows || [])]
+    .filter((row) => {
+      const needle = search.trim().toUpperCase()
+      const matchesSearch = !needle || row.instrument?.base?.includes(needle) || row.source_symbol?.includes(needle)
+      const matchesChange = minChangeValue == null || Math.abs(Number(row.change_pct_24h || 0)) >= Math.abs(minChangeValue)
+      const matchesTurnover = minTurnoverValue == null || Number(row.turnover_usd || 0) >= minTurnoverValue
+      return matchesSearch && matchesChange && matchesTurnover
+    })
+    .sort((left, right) => {
+      let comparison = 0
+      if (sort.key === 'coin') comparison = String(left.instrument?.base || '').localeCompare(String(right.instrument?.base || ''))
+      if (sort.key === 'exchange') comparison = String(left.source_exchange || '').localeCompare(String(right.source_exchange || ''))
+      if (sort.key === 'change') comparison = Number(left.change_pct_24h || 0) - Number(right.change_pct_24h || 0)
+      if (sort.key === 'corr') comparison = Number(left.btc_corr_7d ?? -2) - Number(right.btc_corr_7d ?? -2)
+      if (sort.key === 'turnover') comparison = Number(left.turnover_usd || 0) - Number(right.turnover_usd || 0)
+      return sort.direction === 'asc' ? comparison : -comparison
+    })
+  const binanceSources = (run?.rows || []).filter((row) => row.source_exchange === 'binance').length
+  const bybitFallbacks = (run?.rows || []).filter((row) => row.source_exchange === 'bybit').length
+  const toggleChart = (instrument, checked) => {
+    if (checked) {
+      const result = addInstrumentChart(instrument)
+      setSelectedCharts(result.charts)
+      if (result.error) setError(result.error)
+    } else {
+      setSelectedCharts(removeInstrumentCharts(instrument))
+    }
+  }
+
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Prop list / futures</div><h1>Prop screen</h1></div>
+        <span className="updated mono">{formatUpdated(run?.observed_at)}</span>
+      </div>
+      <div className="fx ac gap12 wrap">
+        <button className="btn btn-primary" type="button" disabled={loading} onClick={refresh}>
+          {loading && <span className="spinner" />}<RefreshCw size={16} />Refresh now
+        </button>
+        <button className={`btn ${selectingCharts ? 'on' : ''}`} type="button" onClick={() => setSelectingCharts((value) => !value)}>
+          <BarChart3 size={16} />{selectingCharts ? 'Done' : 'Set charts'}
+        </button>
+        <label className="searchbox"><Search size={15} /><input placeholder="Search coin" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+        <div className="exchange-states inline-states">
+          {Object.entries(run?.exchanges || {}).map(([name, state]) => (
+            <span className={`exchange-state ${state.ok ? 'ok' : 'bad'}`} title={state.error || `${state.tickers} tickers`} key={name}>
+              <span className="status-dot" />{exchangeFullLabel(name)}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="cards">
+        <SummaryCard label="Prop list" value={run?.prop_total ?? 0} />
+        <SummaryCard label="Listed" value={run?.listed ?? 0} />
+        <SummaryCard label="Binance source" value={binanceSources} />
+        <SummaryCard label="Bybit fallback" value={bybitFallbacks} />
+      </div>
+      <div className="prop-screen-filters">
+        <label className="field inline">
+          <span>Minimum absolute 24h change, %</span>
+          <input
+            className="input mono"
+            type="number"
+            min="0"
+            step="0.1"
+            placeholder="No minimum"
+            value={minChange}
+            onChange={(event) => setMinChange(event.target.value)}
+          />
+        </label>
+        <label className="field inline">
+          <span>Minimum 24h turnover, $</span>
+          <input
+            className="input mono"
+            type="number"
+            min="0"
+            step="1000000"
+            placeholder="No minimum"
+            value={minTurnover}
+            onChange={(event) => setMinTurnover(event.target.value)}
+          />
+        </label>
+        <span className="updated mono prop-screen-visible">showing {rows.length} of {run?.listed ?? 0}</span>
+      </div>
+      {error && <div className="banner">{error}</div>}
+      <div className="tblwrap">
+        <table className="tbl prop-screen-table">
+          <thead>
+            <tr>
+              {selectingCharts && <th className="chart-select-cell"><span className="sr-only">Chart</span></th>}
+              <PropSortHeader label="Coin" sortKey="coin" sort={sort} onSort={changeSort} />
+              <th>Available</th>
+              <PropSortHeader label="Source" sortKey="exchange" sort={sort} onSort={changeSort} />
+              <th>Contract</th>
+              <PropSortHeader label="24h change" sortKey="change" sort={sort} onSort={changeSort} align="right" />
+              <PropSortHeader label="BTC corr 7d" sortKey="corr" sort={sort} onSort={changeSort} align="right" />
+              <PropSortHeader label="24h turnover" sortKey="turnover" sort={sort} onSort={changeSort} align="right" />
+              <th className="ta-r">Ticker time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && !run
+              ? Array.from({ length: 8 }).map((_, index) => <tr key={index}><td colSpan={selectingCharts ? 9 : 8}><div className="skel" /></td></tr>)
+              : rows.map((row) => {
+                const chartInstrument = {
+                  base: row.instrument?.base,
+                  multiplier: row.contract_multiplier || row.instrument?.multiplier || 1,
+                }
+                return (
+                <tr key={instrumentKey(row.instrument)}>
+                  {selectingCharts && (
+                    <td className="chart-select-cell">
+                      <input
+                        type="checkbox"
+                        aria-label={`Show ${row.instrument?.base || 'coin'} chart`}
+                        checked={chartGridHasInstrument(selectedCharts, chartInstrument)}
+                        onChange={(event) => toggleChart(chartInstrument, event.target.checked)}
+                      />
+                    </td>
+                  )}
+                  <td className="mono fw7">{row.instrument?.base || '-'}</td>
+                  <td>
+                    <span className="fx ac gap4">
+                      {row.instrument?.on_binance && <span className="badge">BN</span>}
+                      {row.instrument?.on_bybit && <span className="badge">BB</span>}
+                    </span>
+                  </td>
+                  <td><span className="badge">{exchangeFullLabel(row.source_exchange)}</span></td>
+                  <td className="mono">{row.source_symbol || '-'}</td>
+                  <td className={`mono ta-r fw7 ${Number(row.change_pct_24h) >= 0 ? 'pos' : 'neg'}`}>
+                    {formatSignedPct(row.change_pct_24h)}
+                  </td>
+                  <td className="mono ta-r">{formatCorrelation(row.btc_corr_7d)}</td>
+                  <td className="mono ta-r">{fmtMoney(row.turnover_usd)}</td>
+                  <td className="mono ta-r updated">{formatTickerTime(row.updated_at)}</td>
+                </tr>
+              )})}
+            {!loading && rows.length === 0 && (
+              <tr>
+                <td colSpan={selectingCharts ? 9 : 8} className="empty-cell">
+                  {(run?.rows || []).length ? 'No coins match the current filters.' : 'No prop-list coins are available on Binance or Bybit.'}
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+function PropSortHeader({ label, sortKey, sort, onSort, align }) {
+  const active = sort.key === sortKey
+  return (
+    <th className={align === 'right' ? 'ta-r' : ''}>
+      <button className={`sort-header ${active ? 'on' : ''}`} type="button" onClick={() => onSort(sortKey)}>
+        {label}<span aria-hidden="true">{active ? (sort.direction === 'asc' ? '↑' : '↓') : '↕'}</span>
+      </button>
+    </th>
+  )
+}
+
+function PropScreenWikiPage() {
+  const columns = [
+    ['Coin', 'Монета из общей prop list. На экране остаются только монеты с активным perpetual-контрактом на Binance или Bybit.'],
+    ['Available', 'Биржи, на которых найден подходящий контракт: BN — Binance, BB — Bybit.'],
+    ['Source', 'Биржа, из которой взяты изменение и оборот. Binance приоритетен; Bybit используется как fallback.'],
+    ['Contract', 'Фактический биржевой символ. Например, запись PEPE может быть сопоставлена с контрактом 1000PEPEUSDT.'],
+    ['24h change', 'Процентное изменение цены за последние 24 часа по данным биржи-источника.'],
+    ['BTC corr 7d', 'Корреляция Пирсона часовых доходностей монеты и BTC за последние 7 дней. Диапазон от −1 до +1.'],
+    ['24h turnover', 'Оборот контракта в quote currency за последние 24 часа, отображаемый в долларах.'],
+    ['Ticker time', 'Время рыночного payload, из которого взяты 24h-метрики.'],
+  ]
+  return (
+    <div className="page">
+      <div className="page-heading">
+        <div><div className="page-kicker mono">Prop screen documentation</div><h1>Wiki</h1></div>
+      </div>
+      <p className="wiki-lead">
+        Prop screen помогает быстро найти ликвидные и активно движущиеся монеты из prop list, доступные на Binance или Bybit. Экран предназначен для отбора кандидатов на дальнейший ручной анализ, а не для автоматического торгового сигнала.
+      </p>
+
+      <section className="wiki-section">
+        <h2>Рабочий процесс</h2>
+        <ol className="wiki-steps">
+          <li>Задайте минимальный модуль изменения. Порог 3% оставит как +5%, так и −5%, но скроет движения между −3% и +3%.</li>
+          <li>Задайте минимальный оборот, чтобы убрать слишком малоликвидные контракты.</li>
+          <li>Отсортируйте таблицу по изменению, обороту или корреляции.</li>
+          <li>Сверьте фактический контракт и источник данных, особенно для тикеров с множителем 100 или 1000.</li>
+          <li>Используйте корреляцию вместе с направлением движения и объёмом, затем переходите к графику и ручной оценке сетапа.</li>
+        </ol>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Как читать корреляцию с BTC</h2>
+        <dl className="wiki-terms">
+          <dt>От +0,8 до +1</dt>
+          <dd>Сильная положительная связь: монета обычно движется в ту же сторону, что и BTC. Движение может быть частью общего рыночного импульса.</dd>
+          <dt>От +0,5 до +0,8</dt>
+          <dd>Умеренная положительная связь. BTC остаётся важным фактором, но собственное движение монеты заметнее.</dd>
+          <dt>От −0,5 до +0,5</dt>
+          <dd>Слабая линейная связь на текущем окне. Такие монеты могут быть интересны для поиска более самостоятельного движения.</dd>
+          <dt>От −1 до −0,5</dt>
+          <dd>Выраженная обратная связь: доходности часто имеют противоположный знак. Это не гарантирует продолжения и не делает монету надёжным хеджем.</dd>
+          <dt>n/a</dt>
+          <dd>Недостаточно минимум 100 совместимых часовых доходностей, контракт слишком новый либо свечи временно не удалось получить.</dd>
+        </dl>
+        <div className="wiki-warning">
+          Корреляция описывает недавнюю совместную динамику, а не предсказывает следующую свечу. Она может быстро измениться при новостях, листингах и смене рыночного режима.
+        </div>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Практическое применение</h2>
+        <ul className="wiki-steps">
+          <li>Для поиска общего рыночного импульса смотрите сильное движение, достаточный оборот и высокую положительную корреляцию.</li>
+          <li>Для поиска самостоятельного движения обращайте внимание на большой модуль изменения при низкой абсолютной корреляции.</li>
+          <li>Высокая корреляция означает дополнительную зависимость позиции от BTC; контролируйте одновременную экспозицию по нескольким похожим монетам.</li>
+          <li>Отрицательная корреляция не является самостоятельным основанием для long или short.</li>
+        </ul>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Столбцы</h2>
+        <dl className="wiki-terms">
+          {columns.map(([term, description]) => <React.Fragment key={term}><dt>{term}</dt><dd>{description}</dd></React.Fragment>)}
+        </dl>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Добавление на страницу Charts</h2>
+        <p className="wiki-copy">
+          Кнопка Set charts включает чекбоксы слева от монет. Отмеченная монета добавляется в общую сетку
+          Charts с таймфреймом 1 час. Снятие отметки удаляет из сетки все графики этой монеты.
+          Список хранится в браузере и общий для вкладок Screener, Prop screen и Charts.
+        </p>
+      </section>
+
+      <section className="wiki-section">
+        <h2>Обновление и ограничения</h2>
+        <ul className="wiki-steps">
+          <li>24h change и turnover обновляются раз в минуту или по кнопке Refresh now.</li>
+          <li>Корреляция рассчитывается после запуска и затем в медленном цикле примерно раз в 2 часа.</li>
+          <li>Приоритет Binance применяется только при наличии валидных данных; при деградации используется Bybit.</li>
+          <li>Метрики относятся к фьючерсному контракту и могут отличаться от spot-рынка.</li>
+        </ul>
+      </section>
     </div>
   )
 }
@@ -1091,6 +1452,14 @@ function ScreenerWikiPage() {
         </dl>
       </section>
 
+      <section className="wiki-section">
+        <h2>Добавление на страницу Charts</h2>
+        <p className="wiki-copy">
+          Кнопка Set charts показывает чекбоксы перед тикерами. Отметка добавляет свечной график с таймфреймом
+          1 час, снятие отметки удаляет все графики этого инструмента. Максимум можно открыть 10 графиков.
+        </p>
+      </section>
+
       <section className="wiki-section wiki-warning">
         <h2>Важно</h2>
         <p>
@@ -1112,6 +1481,8 @@ function TopPage({ onUnauthorized }) {
   const [exchange, setExchange] = useState('all')
   const [onlyProp, setOnlyProp] = useState(false)
   const [expanded, setExpanded] = useState(null)
+  const [selectingCharts, setSelectingCharts] = useState(false)
+  const [selectedCharts, setSelectedCharts] = useState(() => readChartGrid())
 
   const load = async () => {
     setLoading(true)
@@ -1129,6 +1500,7 @@ function TopPage({ onUnauthorized }) {
   }
 
   useEffect(() => { load() }, [])
+  useEffect(() => subscribeChartGrid(setSelectedCharts), [])
 
   const refresh = async () => {
     setLoading(true)
@@ -1150,11 +1522,23 @@ function TopPage({ onUnauthorized }) {
     if (exchange === 'bybit' && !row.instrument.on_bybit) return false
     return true
   })
+  const toggleChart = (instrument, checked) => {
+    if (checked) {
+      const result = addInstrumentChart(instrument)
+      setSelectedCharts(result.charts)
+      if (result.error) setError(result.error)
+    } else {
+      setSelectedCharts(removeInstrumentCharts(instrument))
+    }
+  }
 
   return (
     <div className="page">
       <div className="fx ac gap12 wrap">
         <button className="btn btn-primary" onClick={refresh}>{loading && <span className="spinner" />}<RefreshCw size={16} />Refresh now</button>
+        <button className={`btn ${selectingCharts ? 'on' : ''}`} type="button" onClick={() => setSelectingCharts((value) => !value)}>
+          <BarChart3 size={16} />{selectingCharts ? 'Done' : 'Set charts'}
+        </button>
         <label className="searchbox"><Search size={15} /><input placeholder="Search ticker" value={search} onChange={(e) => setSearch(e.target.value)} /></label>
         <select className="select" value={exchange} onChange={(e) => setExchange(e.target.value)}>
           <option value="all">All exchanges</option>
@@ -1173,15 +1557,25 @@ function TopPage({ onUnauthorized }) {
       {error && <div className="banner">{error}</div>}
       <div className="tblwrap">
         <table className="tbl">
-          <thead><tr><th>#</th><th>Ticker</th><th className="hide-sm">Exchanges</th><th className="ta-r">Price</th><th className="ta-r">Turnover</th><th className="ta-r">Range</th><th className="ta-r hide-sm">Corr</th><th className="ta-r">Score</th><th className="ta-c">Prop</th></tr></thead>
+          <thead><tr><th>#</th>{selectingCharts && <th className="chart-select-cell"><span className="sr-only">Chart</span></th>}<th>Ticker</th><th className="hide-sm">Exchanges</th><th className="ta-r">Price</th><th className="ta-r">Turnover</th><th className="ta-r">Range</th><th className="ta-r hide-sm">Corr</th><th className="ta-r">Score</th><th className="ta-c">Prop</th></tr></thead>
           <tbody>
-            {loading && rows.length === 0 ? Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan="9"><div className="skel" /></td></tr>) : filtered.map((row) => {
+            {loading && rows.length === 0 ? Array.from({ length: 8 }).map((_, i) => <tr key={i}><td colSpan={selectingCharts ? 10 : 9}><div className="skel" /></td></tr>) : filtered.map((row) => {
               const symbol = displaySymbol(row.instrument)
               const open = expanded === symbol
               return (
                 <React.Fragment key={symbol}>
                   <tr className="rowmain" onClick={() => setExpanded(open ? null : symbol)}>
                     <td className="mono dim">{row.rank}</td>
+                    {selectingCharts && (
+                      <td className="chart-select-cell" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          type="checkbox"
+                          aria-label={`Show ${symbol} chart`}
+                          checked={chartGridHasInstrument(selectedCharts, row.instrument)}
+                          onChange={(event) => toggleChart(row.instrument, event.target.checked)}
+                        />
+                      </td>
+                    )}
                     <td className="fw6">{symbol}</td>
                     <td className="hide-sm"><span className="fx gap4">{row.instrument.on_binance && <span className="badge">BN</span>}{row.instrument.on_bybit && <span className="badge">BB</span>}{row.bybit_only && <span className="badge warn">NEW</span>}</span></td>
                     <td className="mono ta-r">{fmtPrice(row.price)}</td>
@@ -1191,7 +1585,7 @@ function TopPage({ onUnauthorized }) {
                     <td className="mono ta-r score">{Number(row.score || 0).toFixed(4)}</td>
                     <td className="ta-c">{row.in_prop_list ? <span className="badge-prop">yes</span> : <span className="dash">-</span>}</td>
                   </tr>
-                  {open && <tr className="detailrow"><td colSpan="9"><div className="detail"><div className="metrics fx gap24 wrap mono"><span><span className="dim">change</span> {fmtPct(row.change_pct_24h)}</span><span><span className="dim">funding</span> {fmtPct(row.funding_rate * 100)}</span><span><span className="dim">tick</span> {Number(row.relative_tick_pct || 0).toFixed(4)}%</span><span><span className="dim">inplay</span> {row.is_inplay ? 'yes' : 'no'}</span></div></div></td></tr>}
+                  {open && <tr className="detailrow"><td colSpan={selectingCharts ? 10 : 9}><div className="detail"><div className="metrics fx gap24 wrap mono"><span><span className="dim">change</span> {fmtPct(row.change_pct_24h)}</span><span><span className="dim">funding</span> {fmtPct(row.funding_rate * 100)}</span><span><span className="dim">tick</span> {Number(row.relative_tick_pct || 0).toFixed(4)}%</span><span><span className="dim">inplay</span> {row.is_inplay ? 'yes' : 'no'}</span></div></div></td></tr>}
                 </React.Fragment>
               )
             })}
@@ -1523,6 +1917,23 @@ function fmtMoney(value = 0) {
 
 function fmtPct(value = 0) {
   return `${Number(value || 0).toFixed(2)}%`
+}
+
+function formatSignedPct(value = 0) {
+  const number = Number(value || 0)
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)}%`
+}
+
+function formatTickerTime(value) {
+  if (!value) return 'n/a'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime()) || date.getFullYear() <= 1) return 'n/a'
+  return date.toLocaleTimeString()
+}
+
+function formatCorrelation(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'n/a'
+  return Number(value).toFixed(2)
 }
 
 function fmtPrice(value = 0) {

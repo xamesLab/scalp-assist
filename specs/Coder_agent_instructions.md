@@ -1,7 +1,7 @@
 # Инструкция для кодового агента
 
-**Версия:** 2.0
-**Дата:** 27.07.2026
+**Версия:** 2.1
+**Дата:** 29.07.2026
 
 ## Контекст проекта
 
@@ -9,6 +9,7 @@
 информационными контурами:
 
 - скринер Binance/Bybit;
+- prop-screen Binance/Bybit;
 - статистика межбиржевого арбитража Binance/Bybit/OKX.
 
 Главные документы:
@@ -18,6 +19,7 @@
 - `specs/Deploy_VPS_guide.md`
 - `specs/Summary_описание_проекта.md`
 - `specs/Screener_contour_agent_guide.md` — подробные инварианты скринера
+- `specs/Prop_screen_contour_agent_guide.md` — выбор prop-контрактов и источника
 - `specs/Arbitrage_contour_agent_guide.md` — подробные инварианты арбитража
 
 При конфликте PRD и Dev plan выше старого HTML-мокапа. Мокап задаёт визуальный
@@ -39,6 +41,8 @@
   только нейтральные типы `domain`/`marketdata`.
 - Арбитраж остаётся read-only: никаких API-ключей, ордеров и формулировок,
   обещающих исполнимую прибыль.
+- Prop-screen использует существующую prop list и общий `MarketSnapshot`;
+  отдельные клиенты или funding/BBO-запросы для него не создавать.
 
 ## Живые запросы к биржам
 
@@ -58,6 +62,21 @@ C:\Windows\System32\cmd.exe /c curl -s -i "https://www.okx.com/api/v5/public/tim
 Обычные тесты не должны требовать сеть. Live-тесты держать под build tag
 `integration`, а ответы контрактов проверять через fixtures/`httptest`.
 
+## Контур Charts
+
+- `/app/charts` — отдельная сетка свечных графиков, не часть арбитражного
+  контура.
+- Состояние слотов хранить только в `scalpAssist.chartGrid.v1`; сервер не
+  сохраняет пользовательскую раскладку.
+- Канонический ключ инструмента: `BASE:MULTIPLIER`.
+- Источник: Binance, при отсутствии — Bybit; USDT предпочтительнее USDC внутри
+  одной биржи.
+- Один браузерный WebSocket мультиплексирует до десяти `slot_id`, одинаковые
+  upstream-подписки должны переиспользоваться.
+- Для frontend выполнять и `npm.cmd test`, и `npm.cmd run build`.
+
+Подробности: `Charts_contour_agent_guide.md`.
+
 ## Frontend routing
 
 - `/` — публичный лендинг.
@@ -67,6 +86,9 @@ C:\Windows\System32\cmd.exe /c curl -s -i "https://www.okx.com/api/v5/public/tim
   страницы скринера.
 - `/app/screener/wiki` — русскоязычная справка; обновлять вместе с колонками,
   формулой score и трактовкой флагов.
+- `/app/prop-screen` — отдельный верхнеуровневый контур prop-монет.
+- `/app/prop-screen/wiki` — русскоязычная справка; обновлять вместе с метриками,
+  фильтрами и трактовкой корреляции.
 - `/app/arbitrage` — List арбитража.
 - `/app/arbitrage/settings` — зарезервированная пустая вкладка Settings.
 - `/app/arbitrage/wiki` — реализованная русскоязычная справка; синхронизировать
@@ -90,4 +112,6 @@ git status --short
 
 Для арбитража отдельно проверить fixtures всех трёх бирж, деградацию при отказе
 одной биржи, stale/skew/multiplier filters, комиссии, capacity и миграцию БД.
+Для prop-screen проверить Binance priority, Bybit fallback, USDT/multiplier
+matching, неоднозначный base, деградацию, refresh mutex и round-trip corr cache.
 Не коммитить runtime БД, JWT secret, бинарники и пользовательские списки.

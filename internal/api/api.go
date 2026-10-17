@@ -24,8 +24,10 @@ import (
 
 	"scalp-assist/internal/arbitrage"
 	arbitragemodel "scalp-assist/internal/arbitrage/model"
+	marketcharts "scalp-assist/internal/charts"
 	"scalp-assist/internal/config"
 	"scalp-assist/internal/domain"
+	"scalp-assist/internal/propscreen"
 	"scalp-assist/internal/store"
 )
 
@@ -38,6 +40,8 @@ type Server struct {
 	secureCookies bool
 	refresh       func(context.Context) error
 	arbitrage     *arbitrage.Service
+	propScreen    *propscreen.Service
+	charts        *marketcharts.Service
 	loginLimiter  *loginLimiter
 	now           func() time.Time
 }
@@ -49,6 +53,8 @@ type Options struct {
 	SecureCookies bool
 	Refresh       func(context.Context) error
 	Arbitrage     *arbitrage.Service
+	PropScreen    *propscreen.Service
+	Charts        *marketcharts.Service
 }
 
 type dashboardArbitrageRow struct {
@@ -73,6 +79,8 @@ func New(opts Options) *Server {
 		secureCookies: opts.SecureCookies,
 		refresh:       opts.Refresh,
 		arbitrage:     opts.Arbitrage,
+		propScreen:    opts.PropScreen,
+		charts:        opts.Charts,
 		loginLimiter:  newLoginLimiter(5, time.Minute),
 		now:           time.Now,
 	}
@@ -98,6 +106,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/arbitrage/fees", s.withAuth(s.arbitrageFees))
 	mux.HandleFunc("/api/arbitrage/charts/instruments", s.withAuth(s.arbitrageChartInstruments))
 	mux.HandleFunc("/api/arbitrage/charts/stream", s.withAuth(s.arbitrageChartStream))
+	mux.HandleFunc("/api/prop-screen", s.withAuth(s.propScreenCurrent))
+	mux.HandleFunc("/api/prop-screen/refresh", s.withAuth(s.propScreenRefresh))
+	mux.HandleFunc("/api/charts/instruments", s.withAuth(s.chartInstruments))
+	mux.HandleFunc("/api/charts/stream", s.withAuth(s.chartStream))
 	mux.HandleFunc("/api/screener/top", s.withAuth(s.top))
 	mux.HandleFunc("/api/screener/history", s.withAuth(s.history))
 	mux.HandleFunc("/api/screener/snapshots", s.withAuth(s.snapshots))
@@ -106,6 +118,46 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/screener/settings", s.withAuth(s.settings))
 	mux.HandleFunc("/api/screener/refresh", s.withAuth(s.refreshHandler))
 	return mux
+}
+
+func (s *Server) propScreenCurrent(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	if s.propScreen == nil {
+		writeError(w, http.StatusServiceUnavailable, "prop_screen_unavailable", "prop-screen service is unavailable")
+		return
+	}
+	run := s.propScreen.Latest()
+	if run.ObservedAt.IsZero() {
+		if err := s.propScreen.Refresh(r.Context()); err != nil && !errors.Is(err, propscreen.ErrRefreshInProgress) {
+			writeError(w, http.StatusBadGateway, "prop_screen_refresh_failed", err.Error())
+			return
+		}
+		run = s.propScreen.Latest()
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) propScreenRefresh(w http.ResponseWriter, r *http.Request, _ store.User) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if s.propScreen == nil {
+		writeError(w, http.StatusServiceUnavailable, "prop_screen_unavailable", "prop-screen service is unavailable")
+		return
+	}
+	if err := s.propScreen.Refresh(r.Context()); err != nil {
+		if errors.Is(err, propscreen.ErrRefreshInProgress) {
+			writeError(w, http.StatusConflict, "refresh_in_progress", err.Error())
+			return
+		}
+		writeError(w, http.StatusBadGateway, "prop_screen_refresh_failed", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, s.propScreen.Latest())
 }
 
 func (s *Server) dashboardSummary(w http.ResponseWriter, r *http.Request, _ store.User) {
@@ -130,6 +182,19 @@ func (s *Server) dashboardSummary(w http.ResponseWriter, r *http.Request, _ stor
 	}
 	topScore := dashboardTopScreener(screenerRows, 5)
 	positiveRows, positiveTotal := dashboardPositiveArbitrage(arbitrageRun.Opportunities, 5)
+	propRun := propscreen.Run{}
+	if s.propScreen != nil {
+		propRun = s.propScreen.Latest()
+	}
+	propBinanceSources := 0
+	propBybitFallbacks := 0
+	for _, row := range propRun.Rows {
+		if row.SourceExchange == domain.ExchangeBinance {
+			propBinanceSources++
+		} else if row.SourceExchange == domain.ExchangeBybit {
+			propBybitFallbacks++
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"screener": map[string]any{
 			"updated_at": screener.CreatedAt,
@@ -143,6 +208,14 @@ func (s *Server) dashboardSummary(w http.ResponseWriter, r *http.Request, _ stor
 			"exchanges":              arbitrageRun.ExchangeState,
 			"positive_opportunities": positiveRows,
 			"positive_total":         positiveTotal,
+		},
+		"prop_screen": map[string]any{
+			"updated_at":      propRun.ObservedAt,
+			"prop_total":      propRun.PropTotal,
+			"listed":          propRun.Listed,
+			"binance_sources": propBinanceSources,
+			"bybit_fallbacks": propBybitFallbacks,
+			"exchanges":       propRun.ExchangeState,
 		},
 	})
 }
@@ -522,10 +595,22 @@ func (s *Server) propList(w http.ResponseWriter, r *http.Request, _ store.User) 
 			writeError(w, http.StatusBadRequest, "prop_error", err.Error())
 			return
 		}
+		s.triggerPropScreenRefresh()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (s *Server) triggerPropScreenRefresh() {
+	if s.propScreen == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = s.propScreen.Refresh(ctx)
+	}()
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request, _ store.User) {

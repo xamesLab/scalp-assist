@@ -8,6 +8,7 @@ cycles:
   fast_interval: 15m
   slow_interval: 2h
   arbitrage_interval: 10s
+  prop_screen_interval: 1m
 
 settings:
   min_volume_usd: 100000000
