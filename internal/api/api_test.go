@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -57,6 +58,91 @@ func TestLoginMeLogoutFlow(t *testing.T) {
 	resp = request(t, ts, http.MethodPost, "/api/auth/logout", nil, cookie)
 	if resp.Code != http.StatusOK {
 		t.Fatalf("logout status = %d", resp.Code)
+	}
+	resp = request(t, ts, http.MethodGet, "/api/auth/me", nil, cookie)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("old session after logout status = %d, want 401", resp.Code)
+	}
+}
+
+func TestRegisterCreatesSessionAndNormalizesEmail(t *testing.T) {
+	ts := newTestServer(t)
+	ownerCookie := login(t, ts, "owner@example.com", "secret", http.StatusOK)
+	sharedProps := []store.PropInstrument{{Instrument: domain.Instrument{Base: "BTC", Multiplier: 1}, Note: "shared"}}
+	resp := request(t, ts, http.MethodPut, "/api/prop-list", sharedProps, ownerCookie)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("seed shared prop list status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	resp = request(t, ts, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": "  New.User@Example.COM ", "password": "a sufficiently long password",
+	}, nil)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("register status = %d body=%s", resp.Code, resp.Body.String())
+	}
+	cookie := resp.Result().Cookies()[0]
+	if cookie.Name != sessionCookie || !cookie.HttpOnly || cookie.SameSite != http.SameSiteLaxMode || cookie.Secure {
+		t.Fatalf("unexpected session cookie: %+v", cookie)
+	}
+	resp = request(t, ts, http.MethodGet, "/api/auth/me", nil, cookie)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"email":"new.user@example.com"`) {
+		t.Fatalf("registered session status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	resp = request(t, ts, http.MethodGet, "/api/prop-list", nil, cookie)
+	var gotProps []store.PropInstrument
+	decode(t, resp, &gotProps)
+	if resp.Code != http.StatusOK || len(gotProps) != 1 || gotProps[0].Note != "shared" {
+		t.Fatalf("new account should see shared prop list: status=%d props=%+v", resp.Code, gotProps)
+	}
+	resp = request(t, ts, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": "NEW.USER@example.com", "password": "a sufficiently long password",
+	}, nil)
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("duplicate registration status = %d, want 409 body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestRegisterRejectsInvalidInputAndRateLimits(t *testing.T) {
+	ts := newTestServer(t)
+	for _, body := range []map[string]string{
+		{"email": "not-an-email", "password": "a sufficiently long password"},
+		{"email": "valid@example.com", "password": "too short"},
+		{"email": "valid@example.com", "password": strings.Repeat("x", 73)},
+	} {
+		resp := request(t, ts, http.MethodPost, "/api/auth/register", body, nil)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("registration with invalid input status=%d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+	ts = newTestServer(t)
+	for i := 0; i < 5; i++ {
+		resp := request(t, ts, http.MethodPost, "/api/auth/register", map[string]string{
+			"email": fmt.Sprintf("user%d@example.com", i), "password": "a sufficiently long password",
+		}, nil)
+		if resp.Code != http.StatusCreated {
+			t.Fatalf("registration %d status=%d body=%s", i, resp.Code, resp.Body.String())
+		}
+	}
+	resp := request(t, ts, http.MethodPost, "/api/auth/register", map[string]string{
+		"email": "last@example.com", "password": "a sufficiently long password",
+	}, nil)
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("registration limit status=%d, want 429", resp.Code)
+	}
+}
+
+func TestClientIPTrustsForwardedAddressOnlyFromConfiguredProxy(t *testing.T) {
+	_, proxy, err := net.ParseCIDR("127.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "127.0.0.1:8080"
+	request.Header.Set("X-Forwarded-For", "198.51.100.42")
+	if got := clientIP(request, nil); got != "127.0.0.1" {
+		t.Fatalf("untrusted forwarded address used: got %q", got)
+	}
+	if got := clientIP(request, []*net.IPNet{proxy}); got != "198.51.100.42" {
+		t.Fatalf("trusted forwarded address = %q", got)
 	}
 }
 

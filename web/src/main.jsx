@@ -52,6 +52,7 @@ const api = {
   },
   me: () => api.request('/api/auth/me'),
   login: (email, password) => api.request('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
+  register: (email, password) => api.request('/api/auth/register', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => api.request('/api/auth/logout', { method: 'POST' }),
   top: (limit = 20) => api.request(`/api/top?limit=${limit}`),
   health: () => api.request('/api/health'),
@@ -169,11 +170,12 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
 
   const submit = async (event) => {
     event.preventDefault()
-    if (mode !== 'login') return
     setLoading(true)
     setError('')
     try {
-      const me = await api.login(email, password)
+      const me = mode === 'login'
+        ? await api.login(email, password)
+        : await api.register(email, password)
       setUser(me)
       nav('/app')
     } catch (err) {
@@ -196,15 +198,16 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
         </div>
         <label className="field">
           <span>Email</span>
-          <input className="input" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+          <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" maxLength={254} required />
         </label>
         <label className="field">
           <span>Password</span>
-          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 15 : undefined} required />
         </label>
+        {mode === 'register' && <div className="dim">At least 15 characters. Email confirmation is not enabled.</div>}
         {error && <div className="banner compact">{error}</div>}
-        <button className="btn btn-primary full" disabled={loading || mode !== 'login'}>
-          {loading && <span className="spinner" />} {mode === 'login' ? 'Sign in' : 'Invite only'}
+        <button className="btn btn-primary full" disabled={loading}>
+          {loading && <span className="spinner" />} {mode === 'login' ? 'Sign in' : 'Create account'}
         </button>
       </form>
     </div>

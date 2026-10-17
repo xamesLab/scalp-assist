@@ -23,6 +23,11 @@ import (
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
+var (
+	ErrEmailExists  = errors.New("email already registered")
+	ErrUserNotFound = errors.New("user not found")
+)
+
 type Store struct {
 	writer *sql.DB
 	reader *sql.DB
@@ -37,6 +42,7 @@ type User struct {
 	ID           int64
 	Email        string
 	PasswordHash string
+	AuthVersion  int64
 	CreatedAt    time.Time
 }
 
@@ -167,6 +173,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 		}
 		if applied {
 			continue
+		}
+		if version == 4 {
+			var duplicates int
+			if err := s.reader.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM (
+  SELECT lower(trim(email)) FROM users GROUP BY lower(trim(email)) HAVING COUNT(*) > 1
+)`).Scan(&duplicates); err != nil {
+				return err
+			}
+			if duplicates > 0 {
+				return errors.New("cannot migrate users: email addresses collide after case/space normalization")
+			}
 		}
 		raw, err := migrationsFS.ReadFile("migrations/" + entry.Name())
 		if err != nil {
@@ -578,6 +596,7 @@ func (s *Store) BootstrapUser(ctx context.Context, email, password string) (bool
 	if email == "" || password == "" {
 		return false, errors.New("bootstrap email and password are required")
 	}
+	email = normalizeEmail(email)
 	var count int
 	if err := s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		return false, err
@@ -599,8 +618,8 @@ func (s *Store) BootstrapUser(ctx context.Context, email, password string) (bool
 func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 	var user User
 	var created string
-	err := s.reader.QueryRowContext(ctx, `SELECT id, email, password_hash, created_at FROM users WHERE email = ?`, email).
-		Scan(&user.ID, &user.Email, &user.PasswordHash, &created)
+	err := s.reader.QueryRowContext(ctx, `SELECT id, email, password_hash, auth_version, created_at FROM users WHERE email = ? COLLATE NOCASE`, normalizeEmail(email)).
+		Scan(&user.ID, &user.Email, &user.PasswordHash, &user.AuthVersion, &created)
 	if err != nil {
 		return User{}, err
 	}
@@ -611,8 +630,8 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
 	var user User
 	var created string
-	err := s.reader.QueryRowContext(ctx, `SELECT id, email, password_hash, created_at FROM users WHERE id = ?`, id).
-		Scan(&user.ID, &user.Email, &user.PasswordHash, &created)
+	err := s.reader.QueryRowContext(ctx, `SELECT id, email, password_hash, auth_version, created_at FROM users WHERE id = ?`, id).
+		Scan(&user.ID, &user.Email, &user.PasswordHash, &user.AuthVersion, &created)
 	if err != nil {
 		return User{}, err
 	}
@@ -634,6 +653,41 @@ func (s *Store) CheckPassword(ctx context.Context, email, password string) (bool
 	return true, nil
 }
 
+func (s *Store) RegisterUser(ctx context.Context, email, password string) (User, error) {
+	email = normalizeEmail(email)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, err
+	}
+	result, err := s.writer.ExecContext(ctx, `INSERT OR IGNORE INTO users(email, password_hash) VALUES (?, ?)`, email, string(hash))
+	if err != nil {
+		return User{}, err
+	}
+	created, err := result.RowsAffected()
+	if err != nil {
+		return User{}, err
+	}
+	if created == 0 {
+		return User{}, ErrEmailExists
+	}
+	return s.UserByEmail(ctx, email)
+}
+
+func (s *Store) RevokeUserSessions(ctx context.Context, userID int64) error {
+	result, err := s.writer.ExecContext(ctx, `UPDATE users SET auth_version = auth_version + 1 WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
 func (s *Store) ResetPassword(ctx context.Context, email, password string) error {
 	if email == "" || password == "" {
 		return errors.New("email and password are required")
@@ -642,7 +696,8 @@ func (s *Store) ResetPassword(ctx context.Context, email, password string) error
 	if err != nil {
 		return err
 	}
-	result, err := s.writer.ExecContext(ctx, `UPDATE users SET email = ?, password_hash = ? WHERE id = (SELECT id FROM users ORDER BY id LIMIT 1)`, email, string(hash))
+	email = normalizeEmail(email)
+	result, err := s.writer.ExecContext(ctx, `UPDATE users SET email = ?, password_hash = ?, auth_version = auth_version + 1 WHERE email = ? COLLATE NOCASE`, email, string(hash), email)
 	if err != nil {
 		return err
 	}
@@ -651,9 +706,20 @@ func (s *Store) ResetPassword(ctx context.Context, email, password string) error
 		return err
 	}
 	if affected == 0 {
+		var count int
+		if err := s.reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return ErrUserNotFound
+		}
 		_, err = s.writer.ExecContext(ctx, `INSERT INTO users(email, password_hash) VALUES (?, ?)`, email, string(hash))
 	}
 	return err
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 func (s *Store) migrationApplied(ctx context.Context, version int) (bool, error) {

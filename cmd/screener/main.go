@@ -34,7 +34,7 @@ import (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to YAML configuration file")
 	once := flag.Bool("once", false, "fetch market data once and print the scored top")
-	resetPassword := flag.Bool("reset-password", false, "reset first user password from auth.bootstrap_* config values")
+	resetPassword := flag.Bool("reset-password", false, "reset the auth.bootstrap_email account password")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
@@ -150,14 +150,15 @@ func runServer(ctx context.Context, cfg config.Config, logger *slog.Logger, conf
 		addr = "127.0.0.1:8080"
 	}
 	server := api.New(api.Options{
-		Store:         db,
-		Defaults:      cfg.Settings,
-		JWTSecret:     secret,
-		SecureCookies: false,
-		Refresh:       sched.Refresh,
-		Arbitrage:     arbitrageService,
-		PropScreen:    propScreenService,
-		Charts:        chartService,
+		Store:          db,
+		Defaults:       cfg.Settings,
+		JWTSecret:      secret,
+		SecureCookies:  cfg.Auth.SecureCookies,
+		TrustedProxies: cfg.Auth.TrustedProxies,
+		Refresh:        sched.Refresh,
+		Arbitrage:      arbitrageService,
+		PropScreen:     propScreenService,
+		Charts:         chartService,
 	})
 	logger.Info("config loaded",
 		"path", configPath,

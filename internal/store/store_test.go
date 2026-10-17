@@ -232,6 +232,32 @@ func TestBootstrapUserIsIdempotentAndHashesPassword(t *testing.T) {
 	}
 }
 
+func TestRegisterUserNormalizesEmailAndRejectsDuplicates(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	defer db.Close()
+
+	user, err := db.RegisterUser(ctx, "  Person@Example.com ", "correct-horse-battery-staple")
+	if err != nil {
+		t.Fatalf("RegisterUser: %v", err)
+	}
+	if user.Email != "person@example.com" || user.AuthVersion != 1 {
+		t.Fatalf("registered user = %+v", user)
+	}
+	if user.PasswordHash == "correct-horse-battery-staple" {
+		t.Fatal("password stored in plaintext")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte("correct-horse-battery-staple")); err != nil {
+		t.Fatalf("bcrypt compare: %v", err)
+	}
+	if _, err := db.RegisterUser(ctx, "PERSON@example.com", "another-correct-password"); !errors.Is(err, ErrEmailExists) {
+		t.Fatalf("duplicate registration error = %v, want ErrEmailExists", err)
+	}
+	if ok, err := db.CheckPassword(ctx, "PERSON@example.com", "correct-horse-battery-staple"); err != nil || !ok {
+		t.Fatalf("case-insensitive login ok=%v err=%v", ok, err)
+	}
+}
+
 func TestResetPasswordUpdatesOrCreatesUser(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
@@ -250,6 +276,47 @@ func TestResetPasswordUpdatesOrCreatesUser(t *testing.T) {
 	ok, err = store.CheckPassword(ctx, "owner@example.com", "second")
 	if err != nil || !ok {
 		t.Fatalf("second password ok=%v err=%v", ok, err)
+	}
+}
+
+func TestResetPasswordTargetsEmailAndRevokesSessions(t *testing.T) {
+	ctx := context.Background()
+	db := openTestStore(t)
+	defer db.Close()
+
+	first, err := db.RegisterUser(ctx, "first@example.com", "first-account-password")
+	if err != nil {
+		t.Fatalf("register first: %v", err)
+	}
+	second, err := db.RegisterUser(ctx, "second@example.com", "second-account-password")
+	if err != nil {
+		t.Fatalf("register second: %v", err)
+	}
+	if err := db.ResetPassword(ctx, "SECOND@example.com", "new-second-account-password"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if ok, err := db.CheckPassword(ctx, first.Email, "first-account-password"); err != nil || !ok {
+		t.Fatalf("first user was changed: ok=%v err=%v", ok, err)
+	}
+	if ok, err := db.CheckPassword(ctx, second.Email, "new-second-account-password"); err != nil || !ok {
+		t.Fatalf("second user's new password failed: ok=%v err=%v", ok, err)
+	}
+	second, err = db.UserByID(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("read second user: %v", err)
+	}
+	if second.AuthVersion != 2 {
+		t.Fatalf("auth version after password reset = %d, want 2", second.AuthVersion)
+	}
+	if err := db.ResetPassword(ctx, "missing@example.com", "new-account-password"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("unknown account reset error = %v, want ErrUserNotFound", err)
+	}
+	if err := db.RevokeUserSessions(ctx, first.ID); err != nil {
+		t.Fatalf("RevokeUserSessions: %v", err)
+	}
+	first, err = db.UserByID(ctx, first.ID)
+	if err != nil || first.AuthVersion != 2 {
+		t.Fatalf("first auth version after revoke = %+v err=%v", first, err)
 	}
 }
 

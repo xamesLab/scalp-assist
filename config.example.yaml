@@ -54,3 +54,5 @@ normalization_overrides: {}
 auth:
   bootstrap_email: "owner@example.com"
   bootstrap_password: "change-me-before-first-run"
+  secure_cookies: false # set true when HTTPS terminates in front of the API
+  trusted_proxies: [] # add reverse proxy IP/CIDRs to enable per-client rate limits

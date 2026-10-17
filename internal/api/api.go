@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"mime"
 	"net"
 	"net/http"
+	"net/mail"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -34,27 +38,30 @@ import (
 const sessionCookie = "screener_session"
 
 type Server struct {
-	store         *store.Store
-	defaults      domain.Settings
-	jwtSecret     []byte
-	secureCookies bool
-	refresh       func(context.Context) error
-	arbitrage     *arbitrage.Service
-	propScreen    *propscreen.Service
-	charts        *marketcharts.Service
-	loginLimiter  *loginLimiter
-	now           func() time.Time
+	store           *store.Store
+	defaults        domain.Settings
+	jwtSecret       []byte
+	secureCookies   bool
+	trustedProxies  []*net.IPNet
+	refresh         func(context.Context) error
+	arbitrage       *arbitrage.Service
+	propScreen      *propscreen.Service
+	charts          *marketcharts.Service
+	loginLimiter    *loginLimiter
+	registerLimiter *loginLimiter
+	now             func() time.Time
 }
 
 type Options struct {
-	Store         *store.Store
-	Defaults      domain.Settings
-	JWTSecret     []byte
-	SecureCookies bool
-	Refresh       func(context.Context) error
-	Arbitrage     *arbitrage.Service
-	PropScreen    *propscreen.Service
-	Charts        *marketcharts.Service
+	Store          *store.Store
+	Defaults       domain.Settings
+	JWTSecret      []byte
+	SecureCookies  bool
+	TrustedProxies []string
+	Refresh        func(context.Context) error
+	Arbitrage      *arbitrage.Service
+	PropScreen     *propscreen.Service
+	Charts         *marketcharts.Service
 }
 
 type dashboardArbitrageRow struct {
@@ -72,17 +79,26 @@ type dashboardScreenerRow struct {
 }
 
 func New(opts Options) *Server {
+	trustedProxies := make([]*net.IPNet, 0, len(opts.TrustedProxies))
+	for _, proxy := range opts.TrustedProxies {
+		_, network, err := net.ParseCIDR(proxy)
+		if err == nil {
+			trustedProxies = append(trustedProxies, network)
+		}
+	}
 	return &Server{
-		store:         opts.Store,
-		defaults:      opts.Defaults,
-		jwtSecret:     opts.JWTSecret,
-		secureCookies: opts.SecureCookies,
-		refresh:       opts.Refresh,
-		arbitrage:     opts.Arbitrage,
-		propScreen:    opts.PropScreen,
-		charts:        opts.Charts,
-		loginLimiter:  newLoginLimiter(5, time.Minute),
-		now:           time.Now,
+		store:           opts.Store,
+		defaults:        opts.Defaults,
+		jwtSecret:       opts.JWTSecret,
+		secureCookies:   opts.SecureCookies,
+		trustedProxies:  trustedProxies,
+		refresh:         opts.Refresh,
+		arbitrage:       opts.Arbitrage,
+		propScreen:      opts.PropScreen,
+		charts:          opts.Charts,
+		loginLimiter:    newLoginLimiter(5, time.Minute),
+		registerLimiter: newLoginLimiter(5, time.Hour),
+		now:             time.Now,
 	}
 }
 
@@ -90,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", s.health)
 	mux.HandleFunc("/api/auth/login", s.login)
+	mux.HandleFunc("/api/auth/register", s.register)
 	mux.HandleFunc("/api/auth/logout", s.withAuth(s.logout))
 	mux.HandleFunc("/api/auth/me", s.withAuth(s.me))
 	mux.HandleFunc("/api/top", s.withAuth(s.top))
@@ -438,7 +455,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	ip := clientIP(r)
+	ip := clientIP(r, s.trustedProxies)
 	if !s.loginLimiter.Allow(ip, s.now()) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts")
 		return
@@ -447,7 +464,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := readJSON(r, &req); err != nil {
+	if err := readAuthJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
 		return
 	}
@@ -465,26 +482,122 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
 		return
 	}
-	token, err := s.signToken(user.ID, user.Email, s.now().Add(30*24*time.Hour))
-	if err != nil {
+	if err := s.setSessionCookie(w, user); err != nil {
 		writeError(w, http.StatusInternalServerError, "token_error", err.Error())
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": user.ID, "email": user.Email})
+}
+
+func (s *Server) register(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	if !s.registerLimiter.Allow(clientIP(r, s.trustedProxies), s.now()) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many registration attempts")
+		return
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if err := readAuthJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error())
+		return
+	}
+	email, err := normalizeRegistrationEmail(req.Email)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_email", "enter a valid email address")
+		return
+	}
+	if !utf8.ValidString(req.Password) || utf8.RuneCountInString(req.Password) < 15 {
+		writeError(w, http.StatusBadRequest, "weak_password", "password must contain at least 15 characters")
+		return
+	}
+	if len([]byte(req.Password)) > 72 {
+		writeError(w, http.StatusBadRequest, "password_too_long", "password must be no longer than 72 bytes")
+		return
+	}
+	user, err := s.store.RegisterUser(r.Context(), email, req.Password)
+	if errors.Is(err, store.ErrEmailExists) {
+		writeError(w, http.StatusConflict, "email_exists", "an account with this email already exists")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store_error", err.Error())
+		return
+	}
+	if err := s.setSessionCookie(w, user); err != nil {
+		writeError(w, http.StatusInternalServerError, "token_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": user.ID, "email": user.Email})
+}
+
+func (s *Server) setSessionCookie(w http.ResponseWriter, user store.User) error {
+	expires := s.now().Add(30 * 24 * time.Hour)
+	token, err := s.signToken(user.ID, user.Email, user.AuthVersion, expires)
+	if err != nil {
+		return err
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
-		Expires:  s.now().Add(30 * 24 * time.Hour),
+		Expires:  expires,
 		HttpOnly: true,
 		Secure:   s.secureCookies,
 		SameSite: http.SameSiteLaxMode,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"id": user.ID, "email": user.Email})
+	return nil
 }
 
-func (s *Server) logout(w http.ResponseWriter, r *http.Request, _ store.User) {
+func readAuthJSON(w http.ResponseWriter, r *http.Request, out any) error {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		return errors.New("content type must be application/json")
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request must contain a single JSON object")
+		}
+		return err
+	}
+	return nil
+}
+
+func normalizeRegistrationEmail(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 254 {
+		return "", errors.New("invalid email length")
+	}
+	for _, char := range value {
+		if char > 127 {
+			return "", errors.New("email must use ASCII characters")
+		}
+	}
+	parsed, err := mail.ParseAddress(value)
+	if err != nil || parsed.Address != value || !strings.Contains(value, "@") {
+		return "", errors.New("invalid email address")
+	}
+	return strings.ToLower(value), nil
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request, user store.User) {
 	if r.Method != http.MethodPost {
 		methodNotAllowed(w)
+		return
+	}
+	if err := s.store.RevokeUserSessions(r.Context(), user.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "session_revoke_failed", err.Error())
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -678,6 +791,10 @@ func (s *Server) withAuth(next func(http.ResponseWriter, *http.Request, store.Us
 			writeError(w, http.StatusUnauthorized, "unauthorized", "unknown user")
 			return
 		}
+		if user.AuthVersion != claims.AuthVersion {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "invalid session")
+			return
+		}
 		next(w, r, user)
 	}
 }
@@ -695,14 +812,15 @@ func (s *Server) currentSettings(ctx context.Context) (map[string]string, domain
 }
 
 type tokenClaims struct {
-	UserID int64  `json:"user_id"`
-	Email  string `json:"email"`
-	Exp    int64  `json:"exp"`
+	UserID      int64  `json:"user_id"`
+	Email       string `json:"email"`
+	AuthVersion int64  `json:"auth_version"`
+	Exp         int64  `json:"exp"`
 }
 
-func (s *Server) signToken(userID int64, email string, exp time.Time) (string, error) {
+func (s *Server) signToken(userID int64, email string, authVersion int64, exp time.Time) (string, error) {
 	header, _ := json.Marshal(map[string]string{"alg": "HS256", "typ": "JWT"})
-	payload, _ := json.Marshal(tokenClaims{UserID: userID, Email: email, Exp: exp.Unix()})
+	payload, _ := json.Marshal(tokenClaims{UserID: userID, Email: email, AuthVersion: authVersion, Exp: exp.Unix()})
 	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(payload)
 	mac := hmac.New(sha256.New, s.jwtSecret)
 	if _, err := mac.Write([]byte(unsigned)); err != nil {
@@ -819,19 +937,44 @@ func displayInstrument(instrument domain.Instrument) string {
 	return fmt.Sprintf("%d%sUSDT", instrument.Multiplier, instrument.Base)
 }
 
-func clientIP(r *http.Request) string {
+func clientIP(r *http.Request, trustedProxies []*net.IPNet) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	return r.RemoteAddr
+	current := net.ParseIP(host)
+	if current == nil {
+		return r.RemoteAddr
+	}
+	if !isTrustedProxy(current, trustedProxies) {
+		return current.String()
+	}
+	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for index := len(forwarded) - 1; index >= 0 && isTrustedProxy(current, trustedProxies); index-- {
+		candidate := net.ParseIP(strings.TrimSpace(forwarded[index]))
+		if candidate == nil {
+			break
+		}
+		current = candidate
+	}
+	return current.String()
+}
+
+func isTrustedProxy(ip net.IP, trustedProxies []*net.IPNet) bool {
+	for _, network := range trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 type loginLimiter struct {
-	mu     sync.Mutex
-	limit  int
-	window time.Duration
-	hits   map[string][]time.Time
+	mu        sync.Mutex
+	limit     int
+	window    time.Duration
+	hits      map[string][]time.Time
+	lastSweep time.Time
 }
 
 func newLoginLimiter(limit int, window time.Duration) *loginLimiter {
@@ -842,6 +985,14 @@ func (l *loginLimiter) Allow(ip string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	cutoff := now.Add(-l.window)
+	if l.lastSweep.IsZero() || now.Sub(l.lastSweep) >= l.window {
+		for key, hits := range l.hits {
+			if len(hits) == 0 || !hits[len(hits)-1].After(cutoff) {
+				delete(l.hits, key)
+			}
+		}
+		l.lastSweep = now
+	}
 	var kept []time.Time
 	for _, hit := range l.hits[ip] {
 		if hit.After(cutoff) {
@@ -850,6 +1001,9 @@ func (l *loginLimiter) Allow(ip string, now time.Time) bool {
 	}
 	if len(kept) >= l.limit {
 		l.hits[ip] = kept
+		return false
+	}
+	if len(kept) == 0 && len(l.hits) >= 10_000 {
 		return false
 	}
 	kept = append(kept, now)

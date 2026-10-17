@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"time"
@@ -36,8 +37,10 @@ type CycleConfig struct {
 }
 
 type AuthConfig struct {
-	BootstrapEmail    string `yaml:"bootstrap_email"`
-	BootstrapPassword string `yaml:"bootstrap_password"`
+	BootstrapEmail    string   `yaml:"bootstrap_email"`
+	BootstrapPassword string   `yaml:"bootstrap_password"`
+	SecureCookies     bool     `yaml:"secure_cookies"`
+	TrustedProxies    []string `yaml:"trusted_proxies"`
 }
 
 func Load(path string) (Config, error) {
@@ -118,6 +121,11 @@ func (cfg Config) Validate() error {
 	}
 	if err := ValidateSettings(cfg.Settings); err != nil {
 		return err
+	}
+	for _, proxy := range cfg.Auth.TrustedProxies {
+		if _, _, err := net.ParseCIDR(proxy); err != nil {
+			return fmt.Errorf("auth.trusted_proxies contains invalid CIDR %q", proxy)
+		}
 	}
 	return ValidateArbitrageSettings(cfg.Arbitrage)
 }
