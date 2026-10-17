@@ -1,81 +1,100 @@
 # Scalp Assist
 
-Self-hosted information service for futures trading research. It has four private
-contours behind one account:
+Личный веб-сервис для анализа рынка бессрочных фьючерсов. Он собирает публичные
+данные Binance, Bybit и OKX и показывает их в приватном интерфейсе после входа.
+Сервис не размещает ордера, не использует торговые API-ключи и не выдаёт
+инвестиционных рекомендаций.
 
-- **Screener** ranks Binance and Bybit USDT/USDC perpetuals using volume,
-  volatility, market-relative movement, BTC correlation and a prop-company list.
-- **Prop screen** shows every prop-list coin currently available on Binance or
-  Bybit with its 24-hour change and Binance-first turnover.
-- **Arbitrage** monitors cross-exchange USDT perpetual spreads between Binance,
-  Bybit and OKX. It shows statistics only and never sends orders.
-- **Charts** displays a persistent two-column grid of 5-minute and 1-hour
-  candlestick charts. Binance is preferred and Bybit is used as a fallback.
+## Возможности
 
-The public `/` route is a landing page. After login, `/app` opens a shared
-dashboard with links and summary data for all contours.
+- **Скринер** ранжирует фьючерсные контракты Binance и Bybit по обороту,
+  волатильности, движению относительно рынка и корреляции с BTC. Поддерживает
+  историю результатов, настройки фильтров и импорт списка prop-компаний из TXT.
+- **Prop screen** показывает монеты из prop list, доступные на Binance или Bybit,
+  их изменение и оборот за сутки. Binance используется в приоритете; Bybit служит
+  запасным источником метрик.
+- **Арбитраж** сравнивает бессрочные USDT-контракты Binance, Bybit и OKX. Показывает
+  направления, спреды с учётом заданных комиссий, funding и ёмкость первого уровня
+  стакана. Это данные для ручного анализа, а не гарантия исполнения или прибыли.
+- **Графики** показывают свечи с таймфреймами 5 минут и 1 час; Binance имеет
+  приоритет, Bybit используется как резервный источник. Сетка и выбранные
+  инструменты сохраняются в браузере.
 
-## Local development
+Все разделы доступны из общего приватного экрана. Данные рынка обновляются
+фоновыми циклами; при проблеме с одной биржей сервис по возможности продолжает
+работу на доступных источниках.
 
-Requirements: Go 1.22+, Node.js/npm and Bash (Git Bash works on Windows).
+## Технологии
+
+- Go 1.22 и REST API;
+- React 19 и Vite;
+- SQLite с автоматически применяемыми миграциями;
+- публичные REST/WebSocket интерфейсы Binance, Bybit и OKX.
+
+## Локальный запуск
+
+Нужны Go 1.22+, Node.js/npm и Bash (на Windows подойдёт Git Bash). В корне
+репозитория запустите:
 
 ```bash
 ./dev.sh
 ```
 
-The script creates `config.yaml` from `config.example.yaml` when needed, installs
-frontend dependencies and starts:
+Скрипт при необходимости создаст `config.yaml` из `config.example.yaml`,
+установит зависимости интерфейса и запустит API и Vite:
 
-- frontend: `http://127.0.0.1:5173`
-- API: `http://127.0.0.1:8080`
+- интерфейс: <http://127.0.0.1:5173>
+- API: <http://127.0.0.1:8080>
 
-Environment overrides:
-
-```bash
-CONFIG=config.example.yaml BACKEND_ADDR=127.0.0.1:18080 FRONTEND_PORT=5174 ./dev.sh
-```
-
-PowerShell equivalents:
+Для PowerShell запустите компоненты в двух окнах:
 
 ```powershell
-go run ./cmd/screener -config config.example.yaml
-cd web
+Copy-Item config.example.yaml config.yaml  # если config.yaml ещё нет
+go run ./cmd/screener -config config.yaml
+```
+
+```powershell
+Set-Location web
 npm install
 $env:VITE_API_TARGET = "http://127.0.0.1:8080"
 npm run dev
 ```
 
-## Checks
+Перед первым запуском измените `auth.bootstrap_email` и
+`auth.bootstrap_password` в локальном `config.yaml`. Учётная запись создаётся
+при первом старте с пустой базой данных. Не публикуйте этот файл и не добавляйте
+в него торговые ключи.
+
+## Основные страницы
+
+- `/` — публичная главная;
+- `/auth` — вход;
+- `/app` — сводка;
+- `/app/screener`, `/app/screener/history`, `/app/screener/settings`,
+  `/app/screener/wiki` — скринер;
+- `/app/prop-screen`, `/app/prop-screen/wiki` — список prop-монет;
+- `/app/charts` — сетка графиков;
+- `/app/arbitrage`, `/app/arbitrage/charts`, `/app/arbitrage/info`,
+  `/app/arbitrage/settings`, `/app/arbitrage/wiki` — арбитраж.
+
+Приватные API-маршруты требуют авторизации. Проверка состояния API доступна по
+`/api/health`.
+
+## Сборка
 
 ```bash
-go test ./...
+cd web && npm ci && npm run build
+cd ..
 go build ./cmd/screener
-cd web && npm test && npm run build
 ```
 
-Live exchange checks on the owner's Windows machine must run through
-`C:\Windows\System32\cmd.exe` so they use the configured VPN. See
-`specs/Coder_agent_instructions.md`.
+Frontend и Go API собираются отдельно. Для локальной совместной разработки
+используйте `./dev.sh`.
 
-## Routes
+## Данные и файлы
 
-Public: `/`, `/auth`.
+`config.yaml` содержит локальные настройки, `data/` — базу SQLite и служебные
+данные. Исходный список монет для импорта в настройках скринера находится в
+корневом `prop-list.txt`. Локальные настройки, данные, сборки и каталог `specs/`
+исключены из Git. Пример настроек находится в `config.example.yaml`.
 
-Private: `/app`, `/app/screener`, `/app/screener/history`,
-`/app/screener/settings`, `/app/screener/wiki`, `/app/arbitrage`,
-`/app/arbitrage/settings`, `/app/arbitrage/wiki`, `/app/prop-screen`,
-`/app/prop-screen/wiki`, `/app/charts`.
-
-Legacy screener routes under `/app/top`, `/app/history` and `/app/settings`
-remain available for compatibility.
-
-Production uses the configuration in `config.yaml`; local runtime files and
-build outputs are ignored by Git. Deployment is described in
-`specs/Deploy_VPS_guide.md`.
-
-Detailed implementation guides for coding agents:
-
-- `specs/Screener_contour_agent_guide.md`
-- `specs/Prop_screen_contour_agent_guide.md`
-- `specs/Arbitrage_contour_agent_guide.md`
-- `specs/Charts_contour_agent_guide.md`

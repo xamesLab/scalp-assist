@@ -15,6 +15,9 @@
 /web/node_modules/
 /web/dist/
 
+# Local project specifications and working documents
+/specs/
+
 # Editor and OS noise
 .DS_Store
 Thumbs.db
