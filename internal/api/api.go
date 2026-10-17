@@ -511,8 +511,8 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_email", "enter a valid email address")
 		return
 	}
-	if !utf8.ValidString(req.Password) || utf8.RuneCountInString(req.Password) < 15 {
-		writeError(w, http.StatusBadRequest, "weak_password", "password must contain at least 15 characters")
+	if !utf8.ValidString(req.Password) || utf8.RuneCountInString(req.Password) < 8 {
+		writeError(w, http.StatusBadRequest, "weak_password", "password must contain at least 8 characters")
 		return
 	}
 	if len([]byte(req.Password)) > 72 {

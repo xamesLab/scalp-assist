@@ -202,9 +202,9 @@ function AuthPage({ user, setUser, nav, theme, setTheme }) {
         </label>
         <label className="field">
           <span>Password</span>
-          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 15 : undefined} required />
+          <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} minLength={mode === 'register' ? 8 : undefined} required />
         </label>
-        {mode === 'register' && <div className="dim">At least 15 characters. Email confirmation is not enabled.</div>}
+        {mode === 'register' && <div className="dim">At least 8 characters. Email confirmation is not enabled.</div>}
         {error && <div className="banner compact">{error}</div>}
         <button className="btn btn-primary full" disabled={loading}>
           {loading && <span className="spinner" />} {mode === 'login' ? 'Sign in' : 'Create account'}

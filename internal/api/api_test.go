@@ -105,7 +105,7 @@ func TestRegisterRejectsInvalidInputAndRateLimits(t *testing.T) {
 	ts := newTestServer(t)
 	for _, body := range []map[string]string{
 		{"email": "not-an-email", "password": "a sufficiently long password"},
-		{"email": "valid@example.com", "password": "too short"},
+		{"email": "valid@example.com", "password": "1234567"},
 		{"email": "valid@example.com", "password": strings.Repeat("x", 73)},
 	} {
 		resp := request(t, ts, http.MethodPost, "/api/auth/register", body, nil)
@@ -116,7 +116,7 @@ func TestRegisterRejectsInvalidInputAndRateLimits(t *testing.T) {
 	ts = newTestServer(t)
 	for i := 0; i < 5; i++ {
 		resp := request(t, ts, http.MethodPost, "/api/auth/register", map[string]string{
-			"email": fmt.Sprintf("user%d@example.com", i), "password": "a sufficiently long password",
+			"email": fmt.Sprintf("user%d@example.com", i), "password": "12345678",
 		}, nil)
 		if resp.Code != http.StatusCreated {
 			t.Fatalf("registration %d status=%d body=%s", i, resp.Code, resp.Body.String())
